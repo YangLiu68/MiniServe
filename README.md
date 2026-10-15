@@ -37,6 +37,7 @@ recorded with every run); medians of 2 rounds with rotated order. Full tables, s
 | Shared 1,024-token system prompt (prefix caching)? | TTFT p50 **671 → 75 ms**, 3× throughput, 94% of prompt tokens served from cache |
 | One tenant flooding the server? | fair (VTC) scheduling: the light tenant's TTFT p50 **4.6 → 2.1 s**, its completions 8 → 14 per round, total throughput unchanged |
 | Is our forward pass slower than Transformers for one stream? | parity to ~9% slower (36–38 vs 35 ms per token at concurrency 1; run-to-run noise ~5%) |
+| int8 weight-only quantization? | weights 257 → 129 MB, perplexity unchanged (14.62 → 14.61), single-stream decode 13% faster |
 | How does it compare with Ollama (llama.cpp + Metal) on the same Mac? | One stream: Ollama is **~3× faster** (fused Metal kernels vs ~1,200 PyTorch launches per step). 16 clients: MiniServe **304 vs 242 tok/s** and half the median TTFT — comparable-to-ahead, wide spread; caveats in BENCHMARK.md |
 | Did kernel-level tweaks help? | No — fused RMSNorm/RoPE (−32% kernel calls) ran 3–19% *slower* on MPS; `torch.compile` ~25× slower. Documented, not merged. |
 
@@ -48,7 +49,7 @@ Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 make install                 # uv sync --extra hf --extra bench
-make test                    # 140+ tests, no downloads, CPU only
+make test                    # 142 tests, no downloads, CPU only (+4 opt-in real-model)
 MINISERVE_API_KEY=demo-key uv run miniserve        # SmolLM2-135M on MPS/CUDA/CPU (auto)
 open http://127.0.0.1:8000/dashboard
 ```

@@ -14,7 +14,7 @@ is explicitly caveated.
 | Long prompts stalling running streams | chunked prefill cuts chat ITL p95 **663 → 163 ms**; long prompts' own TTFT +29% |
 | Prefix caching (1,024-token shared system prompt) | TTFT p50 **671 → 75 ms**, throughput **3×**, 94% of prompt tokens from cache, peak KV 18% → 5% |
 | Fairness (heavy tenant: 12 in flight, light: 1; 4 slots) | VTC: light tenant TTFT p50 **4.6 → 2.1 s**, 8 → 14 completions per round; total throughput unchanged |
-| int8 weight-only quantization | *pending — suite queued* |
+| int8 weight-only quantization | weights **257 → 129 MB**, perplexity 14.617 → 14.610 (unchanged), 96.9% top-1 agreement; single-stream decode **13% faster** |
 | Ollama (llama.cpp + Metal) on the same Mac | 1 client: Ollama **~3× faster** (112 vs 39 tok/s). 16 clients: MiniServe **304 vs 242 tok/s**, TTFT p50 238 vs 477 ms (wide spread) |
 | Two kernel-level optimizations tried | **both slower on MPS** (fused RMSNorm/RoPE +3–19%; `torch.compile` ~25×) — not merged |
 
@@ -182,7 +182,43 @@ FCFS and 2.1 s under VTC.
 
 ## M5 — int8 weight-only quantization (suite `quant` + `bench/eval_quant.py`)
 
-*Pending.*
+W8A16: every projection and the (tied) LM head/embedding stored as int8 with per-output-channel
+fp32 scales, multiplied through PyTorch's fused `_weight_int8pack_mm` on MPS; norms, biases and
+the KV cache stay fp16. 2 rounds at a clean commit (`results/quant/run2/`, `quality.json`).
+
+**Quality** (teacher-forced over `bench/data/eval_text.txt`, 547 tokens, vs Transformers fp32):
+
+| variant | perplexity | top-1 agreement with fp32 | mean KL(fp32 ‖ variant) | weights |
+|---|---:|---:|---:|---:|
+| Transformers fp32 (reference) | 14.615 | — | — | — |
+| native fp32 (CPU) | 14.615 | 100.0% | 0.00000 | 513 MB |
+| native fp16 (MPS) | 14.617 | 99.6% | 0.00002 | 257 MB |
+| native fp16 + **int8 weights** (MPS) | 14.610 | 96.9% | 0.0036 | **129 MB** |
+
+**Speed and memory** (prompt 128, 64 output tokens):
+
+| clients | config | out tok/s | TPOT p50 | TTFT p50 | peak RSS |
+|---:|---|---:|---:|---:|---:|
+| 1 | fp16 | 47.0 | 20.1 ms | 42 ms | 680 MB |
+| 1 | fp16 + int8 weights | **55.1** | **17.5 ms** | 43 ms | **425 MB** |
+| 16 | fp16 | 368.8 | 41.1 ms | 205 ms | 569 MB |
+| 16 | fp16 + int8 weights | **382.4** | **38.9 ms** | 211 ms | **487 MB** |
+
+(The evaluation text is small — 547 tokens, written for this repo — enough to catch a broken
+kernel or a large quality regression, not to resolve sub-1% perplexity differences.)
+
+Half the weight memory, perplexity unchanged within noise, ~3% of next-token argmaxes flip, and
+decoding gets 13% faster for a single stream (fewer bytes of weights to read per step) and 4%
+faster at 16 clients (where the step is less weight-bandwidth-bound).
+
+**How the first run failed.** The first `quant` run produced 64 tokens per request but *no text*:
+every int8 request emitted token 0. A bisect of the original code against single-change variants,
+on the exact benchmark prompts, found two compounding bugs: the int8 capability probe used a weight
+shape the MPS kernel rejects (N, K must be multiples of 32), so MPS silently used the dequantize
+fallback — which multiplied by raw int8 values before scaling and overflowed fp16 into NaN logits.
+Two other plausible explanations were tested and refuted along the way (fused-kernel overflow;
+fp16-subnormal scales). The broken run's numbers were discarded; the fix and its regression tests
+are in commit `ef398fd` (TESTING.md bug #10).
 
 ## M5 — external comparison: Ollama on the same Mac
 

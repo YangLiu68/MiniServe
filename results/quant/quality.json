@@ -1,0 +1,32 @@
+{
+  "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
+  "tokens": 547,
+  "window": 512,
+  "variants": {
+    "fp32-cpu (native)": {
+      "perplexity": 14.615,
+      "top1_agreement": 1.0,
+      "mean_kl": 0.0,
+      "weights_mb": 513.1
+    },
+    "fp16-mps": {
+      "perplexity": 14.617,
+      "top1_agreement": 0.9963,
+      "mean_kl": 2e-05,
+      "weights_mb": 256.6
+    },
+    "fp16+w8-mps": {
+      "perplexity": 14.61,
+      "top1_agreement": 0.9689,
+      "mean_kl": 0.0036,
+      "weights_mb": 129.1
+    },
+    "fp32+w8-cpu": {
+      "perplexity": 14.611,
+      "top1_agreement": 0.9689,
+      "mean_kl": 0.00357,
+      "weights_mb": 129.2
+    }
+  },
+  "reference_fp32_hf_perplexity": 14.615
+}

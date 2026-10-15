@@ -3,7 +3,7 @@
 ```bash
 make install            # uv sync --extra hf --extra bench
 make lint               # ruff check + format --check
-make test               # 126 tests: toy + tiny random models, no downloads, CPU only
+make test               # 142 tests: toy + tiny random models, no downloads, CPU only
 make test-real          # +4 tests on the real SmolLM2-135M (downloads ~270 MB)
 uv run pytest -m "not torch and not real_model"   # what CI runs without torch installed
 ```
@@ -25,12 +25,14 @@ real uvicorn servers, real sockets and a real SIGTERM, and asserts on **compute 
 | Stop strings | `test_stop.py` | 4 | split-across-deltas, false alarms released, earliest stop wins, **2,000 randomized cases vs a reference truncation** |
 | Detokenizer | `test_detokenizer.py` | 3 | multi-byte held back, concatenation == full decode (200 random strings), truncated tail flushed |
 | Engine | `test_engine.py` | 20 | batching overlaps requests, `max_num_seqs=1` serializes FIFO, cancel running (≤1 extra step) / queued (never reaches model), timeouts (running, queued, inside an uninterruptible step), late step discarded, admission limits (global, per tenant, queued tokens), backend errors isolated, shutdown, stop strings never partially streamed, `ignore_eos`, fairness, preemption with exact outputs, prefix-cache reporting, KV-capacity validation |
-| HTTP API | `test_api.py` | 40 | response shapes, exact `max_tokens`, stream == non-stream (emoji/CJK), 13-case validation matrix, 400 limits incl. exact boundaries, auth, multi-tenant keys + per-tenant rate limits, loading → ready, failed load, 504 / in-band timeouts, chat (JSON + SSE, role chunk), `stop` / `ignore_eos`, `/metrics` contents, `/v1/engine`, draining, injected-backend ownership |
+| HTTP API | `test_api.py` | 44 | response shapes, exact `max_tokens`, stream == non-stream (emoji/CJK), 13-case validation matrix, 400 limits incl. exact boundaries, auth, multi-tenant keys + per-tenant rate limits, loading → ready, failed load, 504 / in-band timeouts, chat (JSON + SSE, role chunk), `stop` / `ignore_eos`, `/metrics` contents, `/v1/engine`, draining, injected-backend ownership, block map + dashboard, 413 body limit, `.env.example` loads |
 | Live sockets | `test_live_cancellation.py` | 4 | real TCP disconnect (stream and non-stream) stops generation (measured in produced tokens), cancel endpoint, 503 overload |
-| Process | `test_drain.py` | 2 | **SIGTERM mid-stream: the stream completes, the process drains and exits**; refuses public bind without a key |
-| Native numerics | `test_native.py` | 22 | for Llama, Qwen2 (QKV bias) and Mistral tiny models: full-prefill logits == HF (atol 2e-5), chunked prefill (1/3/7) == full, **mixed ragged batch == individual HF runs**, greedy == HF reference, prefix-cache hit == cold, preemption under memory pressure == unconstrained; seeded sampling independent of batch composition; int8 close to fp (cos > 0.999) and smaller; fused int8 kernel == dequant fallback; unsupported archs rejected |
+| Process | `test_drain.py` | 3 | **SIGTERM mid-stream: the stream completes, the process drains and exits**; zero drain timeout does not wait; refuses public bind without a key |
+| Native numerics | `test_native.py` | 25 | for Llama, Qwen2 (QKV bias) and Mistral tiny models: full-prefill logits == HF (atol 2e-5), chunked prefill (1/3/7) == full, **mixed ragged batch == individual HF runs**, greedy == HF reference, prefix-cache hit == cold, preemption under memory pressure == unconstrained; seeded sampling independent of batch composition; int8 close to fp (cos > 0.999) and smaller; fused int8 kernel == dequant fallback; int8 probe detects the MPS kernel, odd shapes fall back, no fp16 overflow; unsupported archs rejected |
 | HF backend | `test_hf_backend.py` | 4 | generic `DynamicCache` path on GPT-2 (non-Llama) == reference, preemption rebuilds caches, sampler unit tests, seeded API reproducibility |
-| Bench tooling | `test_bench.py` | 6 | percentile convention, warmup/error handling in summaries, exact-length prompts, deterministic workloads, Prometheus parsing, end-to-end multi-tenant run against a live server |
+| SDK compatibility | `test_openai_sdk.py` | 1 | the official `openai` SDK: completions, chat, streaming, models, error classes |
+| Middleware | `test_middleware.py` | 4 | body-size limit by `Content-Length` and for chunked uploads |
+| Bench tooling | `test_bench.py`, `test_bench_suite.py` | 9 | percentile convention, warmup/error handling in summaries, exact-length prompts, deterministic workloads, Prometheus parsing, end-to-end multi-tenant run against a live server, suite runner with managed server subprocesses and rotation, report rendering, all committed suite files valid |
 | Real model (opt-in) | `test_real_model.py` | 4 | **native engine (batched + chunked) greedy output == Transformers backend, token for token, on SmolLM2-135M**; sensible completion and chat ("Paris"); prefix-cache hit on real prompts; incremental detokenizer == full decode on the real tokenizer |
 
 ## Are the tests sensitive? (mutation checks actually run)
@@ -66,9 +68,10 @@ A test-helper pitfall worth remembering: `policy or FCFSPolicy()` silently repla
 
 | Date | Command | Result |
 |---|---|---|
-| 2026-10-15 | `make lint` | clean |
-| 2026-10-15 | `make test` | 126 passed, 4 skipped (real-model, opt-in) |
-| 2026-10-15 | `make test-real` | 4 passed (CPU fp32) |
+| 2026-10-15 | `make lint` | clean (src, tests, bench, examples) |
+| 2026-10-15 | `make test` | **142 passed**, 4 skipped (real-model, opt-in) |
+| 2026-10-15 | `make test-real` | **4 passed** (CPU fp32; native engine token-identical to Transformers on SmolLM2) |
+| 2026-10-15 | `pytest --cov` (core modules) | engine 95%, scheduler 95%, block manager 99%, server 95%, native backend 89%, policy 93% |
 
 Host: Apple M4 (10 cores, 16 GB), macOS 15.3.2, Python 3.12.10, torch 2.14.1, transformers
 5.19.0. GitHub Actions is configured (lint; tests on 3.11 + 3.12 with CPU torch; torch-free core;
