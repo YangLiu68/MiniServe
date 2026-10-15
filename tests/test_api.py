@@ -330,3 +330,21 @@ def test_request_larger_than_kv_cache_is_400():
         r = complete(c, prompt="x" * 10, max_tokens=7)
         assert r.status_code == 400 and r.json()["error"]["code"] == "exceeds_kv_capacity"
         assert complete(c, prompt="x" * 10, max_tokens=6).status_code == 200
+
+
+def test_block_map_and_dashboard(toy_client):
+    system = "shared system prompt! " * 3  # 66 bytes -> 4 full blocks of 16
+    for q in ("a?", "b?"):
+        complete(toy_client, prompt=system + q, max_tokens=1)
+    b = toy_client.get("/v1/engine/blocks").json()
+    assert len(b["states"]) == 8192 and set(b["states"]) <= set(".c123456789")
+    assert b["states"].count("c") >= 4  # the shared prefix blocks stay cached after finishing
+    assert b["prefix_hit_tokens"] == 64 and b["running"] == []
+    page = toy_client.get("/dashboard")
+    assert page.status_code == 200 and "Paged KV cache" in page.text
+
+
+def test_block_map_requires_auth_when_enabled():
+    with app_client(ToyBackend(), api_key="k") as c:
+        assert c.get("/v1/engine/blocks").status_code == 401
+        assert c.get("/dashboard").status_code == 200  # static page; it asks for the key

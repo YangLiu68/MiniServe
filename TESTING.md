@@ -1,72 +1,75 @@
 # Testing
 
-## Commands
-
 ```bash
-uv sync --extra hf
-uv run ruff check src tests && uv run ruff format --check src tests
-uv run pytest                                            # default: no downloads
-MINISERVE_RUN_REAL_MODEL_TESTS=1 uv run pytest -m real_model   # downloads SmolLM2-135M (~270 MB)
-uv run pytest -m "not torch and not real_model"          # toy-only (works without torch)
+make install            # uv sync --extra hf --extra bench
+make lint               # ruff check + format --check
+make test               # 126 tests: toy + tiny random models, no downloads, CPU only
+make test-real          # +4 tests on the real SmolLM2-135M (downloads ~270 MB)
+uv run pytest -m "not torch and not real_model"   # what CI runs without torch installed
 ```
 
-## Test layers
+## Strategy
 
-| Layer | File | Backend | What it proves |
-|---|---|---|---|
-| Unit | `test_detokenizer.py` | byte tokenizer | Multi-byte characters held back until complete; concatenated deltas == full decode (200 random strings); truncated tail flushed |
-| Engine | `test_engine.py` | toy (sleep-simulated cost) | Echo/stop/length, determinism, cancel running (≤1 extra step) and queued (never reaches model), timeouts while running / queued / inside an uninterruptible step, discard of a step finishing after cancel, FIFO serialisation, admission limit, backend errors, shutdown |
-| HTTP | `test_api.py` | toy | Response shape, exact `max_tokens`, stream == non-stream (incl. emoji/CJK), 422 validation matrix, 400 limits incl. exact context boundary, 404 model, auth, 429 rate limit, loading→ready lifecycle, failed load, 504/in-band timeouts, server timeout cap, bind safety, injected-backend ownership |
-| Live socket | `test_live_cancellation.py` | toy on real uvicorn | Real TCP disconnect (stream and non-stream) stops generation — measured as tokens the backend produced; cancel endpoint; 503 overload over HTTP |
-| Torch path | `test_hf_backend.py` | tiny random GPT-2 | Manual prefill/decode loop with `DynamicCache` == `model.generate()` greedy (4 prompts × 24 tokens); seeded sampling reproducible and seed-sensitive; tiny top-p == greedy; `sample_next` nucleus set; API stream == non-stream |
-| Real model (opt-in) | `test_real_model.py` | SmolLM2-135M-Instruct, CPU fp32 | Sensible greedy output ("Paris"), stream == non-stream, incremental detokenizer == full decode on the real tokenizer (spaces, newlines, emoji, CJK, code) |
+The engine is split so that most of it can be tested **without a model**: the scheduler and
+block manager are pure Python driven by a fake model; the engine is driven by a deterministic
+toy backend whose step cost is a controlled sleep; the numerics are tested by comparing our
+forward pass against Transformers on tiny random models (no download), and finally on the real
+model (opt-in). Timing-sensitive behaviour (cancellation, deadlines, drain) is tested against
+real uvicorn servers, real sockets and a real SIGTERM, and asserts on **compute actually spent**
+(tokens the backend produced), not just on response codes.
 
-## M1 acceptance criteria → evidence
-
-| # | Criterion (PLAN.md) | Evidence |
-|---|---|---|
-| 1 | JSON + SSE completions, deltas concatenate | `test_stream_matches_non_stream`, `test_api_stream_equals_non_stream_on_tiny_model`, real-model `test_stream_equals_non_stream`; manual curl (docs/DEMO.md) |
-| 2 | Background load, `/readyz` 503→200 | `test_not_ready_while_loading_then_ready`, `test_failed_load_is_reported`; observed live with SmolLM2 on MPS |
-| 3 | 422 / 400 / 404 validation | `test_validation_errors` (10 cases), `test_limits_return_400`, `test_wrong_model_is_404` |
-| 4 | Exact `max_tokens`, EOS → stop | `test_max_tokens_is_enforced_exactly`, `test_echo_stop_and_length` |
-| 5 | Disconnect + cancel endpoint stop within one step | `test_live_cancellation.py`; `test_cancel_running_request_stops_within_one_step`; real model: disconnect after 5 of 400 tokens → `cancelled`, 5 tokens produced |
-| 6 | Deadlines incl. queue wait, in-band/504 | `test_timeout_*`, `test_consumer_deadline_fires_during_a_long_forward_pass`, `test_server_timeout_caps_client_timeout` |
-| 7 | No concurrent model use; bounded FIFO; 503 overflow | `test_requests_are_serialized_fifo`, `test_admission_limit_rejects_overflow`, `test_overload_returns_503_over_http` |
-| 8 | Bind safety, auth, rate limit | `test_bind_safety`, `test_auth_required_when_key_set`, `test_rate_limit_returns_429_with_retry_after`; CLI exits 2 on `MINISERVE_HOST=0.0.0.0` without key (run manually) |
-| 9 | Deterministic toy tests; loop == `generate()`; seeded sampling | `test_engine.py`, `test_hf_backend.py` |
-| 10 | Real-model end-to-end via HTTP | Ran `miniserve` (SmolLM2, MPS fp16) + curl: auth, JSON, SSE, disconnect, SIGTERM shutdown (docs/DEMO.md) |
+| Layer | File | Tests | What it proves |
+|---|---|---:|---|
+| Block allocator | `test_block_manager.py` | 10 | block accounting, prefix sharing + ref counts, chained hashes don't alias, ≥1 token always recomputed, LRU evicts tails first, revival accounting, **600-step randomized run with invariants checked after every op** |
+| Scheduler | `test_scheduler.py` | 11 | continuous batching (join mid-flight), token budget + decode-first chunked prefill, no-chunk mode, `max_num_seqs`, recompute preemption of the youngest (outputs still exact), preempted seqs re-admitted first, prefix hits schedule only the tail, FCFS vs VTC order, no idle-credit banking, recompute not billed, **randomized simulation with cancellations: no deadlock, no leaked blocks** |
+| Stop strings | `test_stop.py` | 4 | split-across-deltas, false alarms released, earliest stop wins, **2,000 randomized cases vs a reference truncation** |
+| Detokenizer | `test_detokenizer.py` | 3 | multi-byte held back, concatenation == full decode (200 random strings), truncated tail flushed |
+| Engine | `test_engine.py` | 20 | batching overlaps requests, `max_num_seqs=1` serializes FIFO, cancel running (≤1 extra step) / queued (never reaches model), timeouts (running, queued, inside an uninterruptible step), late step discarded, admission limits (global, per tenant, queued tokens), backend errors isolated, shutdown, stop strings never partially streamed, `ignore_eos`, fairness, preemption with exact outputs, prefix-cache reporting, KV-capacity validation |
+| HTTP API | `test_api.py` | 40 | response shapes, exact `max_tokens`, stream == non-stream (emoji/CJK), 13-case validation matrix, 400 limits incl. exact boundaries, auth, multi-tenant keys + per-tenant rate limits, loading → ready, failed load, 504 / in-band timeouts, chat (JSON + SSE, role chunk), `stop` / `ignore_eos`, `/metrics` contents, `/v1/engine`, draining, injected-backend ownership |
+| Live sockets | `test_live_cancellation.py` | 4 | real TCP disconnect (stream and non-stream) stops generation (measured in produced tokens), cancel endpoint, 503 overload |
+| Process | `test_drain.py` | 2 | **SIGTERM mid-stream: the stream completes, the process drains and exits**; refuses public bind without a key |
+| Native numerics | `test_native.py` | 22 | for Llama, Qwen2 (QKV bias) and Mistral tiny models: full-prefill logits == HF (atol 2e-5), chunked prefill (1/3/7) == full, **mixed ragged batch == individual HF runs**, greedy == HF reference, prefix-cache hit == cold, preemption under memory pressure == unconstrained; seeded sampling independent of batch composition; int8 close to fp (cos > 0.999) and smaller; fused int8 kernel == dequant fallback; unsupported archs rejected |
+| HF backend | `test_hf_backend.py` | 4 | generic `DynamicCache` path on GPT-2 (non-Llama) == reference, preemption rebuilds caches, sampler unit tests, seeded API reproducibility |
+| Bench tooling | `test_bench.py` | 6 | percentile convention, warmup/error handling in summaries, exact-length prompts, deterministic workloads, Prometheus parsing, end-to-end multi-tenant run against a live server |
+| Real model (opt-in) | `test_real_model.py` | 4 | **native engine (batched + chunked) greedy output == Transformers backend, token for token, on SmolLM2-135M**; sensible completion and chat ("Paris"); prefix-cache hit on real prompts; incremental detokenizer == full decode on the real tokenizer |
 
 ## Are the tests sensitive? (mutation checks actually run)
 
-- Removed all three disconnect→cancel paths in `server.py` → both live disconnect tests **failed**;
-  restored → pass.
-- Removed the engine's post-step cancel check → `test_step_finishing_after_cancel_is_discarded`
-  **failed**; restored → pass.
+| Mutation | Result |
+|---|---|
+| Remove the three disconnect → cancel paths in `server.py` | both live disconnect tests fail |
+| Remove the engine's post-step cancellation check | `test_step_finishing_after_cancel_is_discarded` fails |
+| Remove the causal mask in `build_metadata` | 6 native tests fail (logits, chunked, mixed batch, greedy, prefix, preemption) |
 
-## Latest results (2026-10-14, Apple M4, macOS 15.3.2, Python 3.12.10)
+## Bugs found by tests (and fixed)
 
-```
-ruff check / format --check      : clean
-pytest (default)                 : 55 passed, 3 skipped (real-model, opt-in)
-pytest -m real_model (opt-in)    : 3 passed
-```
+1. App closed an **injected** backend at shutdown (real-model fixture reused across apps).
+2. A disconnect during an uninterruptible step whose token was EOS was reported as `stop`
+   (found on the real model) → re-check cancel/deadline after every step.
+3. "Request started" was delivered *after* the first step (up to a full prefill late), so a
+   cancel during the first prefill took the "still queued" path → post it before the step.
+4. `max_waiting=0` rejected every request even when idle (a request is briefly "waiting" before
+   it starts) → admission counts in-flight against `max_num_seqs + max_waiting`.
+5. Test-helper bug worth remembering: `policy or FCFSPolicy()` silently replaced an *empty*
+   `FairPolicy` (it defines `__len__`, so it is falsy).
 
-## Bugs found by testing during M1
+## Latest results
 
-1. **App closed an injected backend on shutdown** (found by the real-model module fixture being
-   reused across two app lifecycles). Fix: only close backends the app loaded itself. Regression:
-   `test_injected_backend_survives_app_shutdown`.
-2. **Disconnect during an uninterruptible step was reported as `stop`** (found in a real-model
-   run: client hung up during a ~10 s prefill whose sampled token was EOS). Fix: re-check
-   cancel/deadline after each step and discard the step's result. Regression:
-   `test_step_finishing_after_cancel_is_discarded`; re-verified on the real model.
+| Date | Command | Result |
+|---|---|---|
+| 2026-10-15 | `make lint` | clean |
+| 2026-10-15 | `make test` | 126 passed, 4 skipped (real-model, opt-in) |
+| 2026-10-15 | `make test-real` | 4 passed (CPU fp32) |
 
-## Environment notes / flakiness risks
+Host: Apple M4 (10 cores, 16 GB), macOS 15.3.2, Python 3.12.10, torch 2.14.1, transformers
+5.19.0. GitHub Actions is configured (lint; tests on 3.11 + 3.12 with CPU torch; torch-free core;
+Docker build + container smoke test) but **has not run yet** — the repository has not been
+pushed.
 
-- On the development machine, imports are I/O-bound and slow (FastAPI 3–12 s, torch +
-  transformers ~10 s wall at low CPU) while the host was heavily loaded by other processes (load
-  average 33–121 on 10 cores). Suite wall time (30–80 s) is dominated by that, not by test bodies
-  (slowest test body ≈ 1 s).
-- Timing-based tests use generous margins (e.g. "fewer than 60 of 300 tokens", "< 0.6 s"), but a
-  severely starved CI runner could still flake them; they are the first suspects if CI is red.
-- CI (GitHub Actions) is planned for M7 and has **not** run yet.
+## Flakiness notes
+
+* Timing-based tests use generous margins, but a severely starved runner could still flake
+  them; they are the first suspects if CI is red.
+* On the development machine imports are I/O-bound and slow (several seconds for
+  FastAPI/torch) because the machine is shared with other heavy jobs; suite wall time is
+  dominated by that, not by test bodies.

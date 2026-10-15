@@ -12,3 +12,5 @@ results/raw/
 .DS_Store
 results/*/check/
 results/*/smoke*/
+.coverage
+results/*/run*/logs/

@@ -54,6 +54,10 @@ class Suite:
     tokenizer: str = "bytes"
     port: int = 8100
     description: str = ""
+    # How the client talks to *managed* MiniServe servers. "miniserve" sends ignore_eos for
+    # fixed-length outputs; "openai" sends plain OpenAI requests, for comparisons with servers
+    # that cannot force output length (e.g. Ollama).
+    client_kind: str = "miniserve"
 
     @classmethod
     def load(cls, path: str | Path) -> Suite:
@@ -73,6 +77,7 @@ class Suite:
             rounds=d.get("rounds", 1),
             tokenizer=d.get("tokenizer", "bytes"),
             port=d.get("port", 8100),
+            client_kind=d.get("client_kind", "miniserve"),
         )
 
 
@@ -192,7 +197,7 @@ def run_suite(suite: Suite, out_dir: Path) -> Path:
                     server = ManagedServer(env, suite.port, logs / f"{cfg.name}__r{rnd}.log")
                     log.info("starting %s (round %d)", cfg.name, rnd)
                     ready = server.wait_ready()
-                    base_url, model, kind = server.base_url, None, "miniserve"
+                    base_url, model, kind = server.base_url, None, suite.client_kind
                 for scen in suite.scenarios:
                     log.info("  %s / %s", cfg.name, scen.name)
                     res = asyncio.run(run_scenario(base_url, scen, factory, model, kind))

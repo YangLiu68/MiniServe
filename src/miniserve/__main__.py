@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 
 import uvicorn
@@ -44,7 +45,8 @@ def main() -> None:
         port=settings.port,
         log_level=settings.log_level,
         log_config=None,  # keep our structured handler
-        timeout_graceful_shutdown=int(settings.drain_timeout_s) or None,
+        # 0 = cancel in-flight requests immediately (None would mean wait forever)
+        timeout_graceful_shutdown=math.ceil(settings.drain_timeout_s),
     )
     DrainingServer(config, app).run()
 

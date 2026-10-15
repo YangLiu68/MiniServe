@@ -1,98 +1,137 @@
 # MiniServe
 
-An educational but real LLM text-generation server, built to make **request scheduling,
-streaming, caching and latency measurement** visible and testable. It is not a competitor to
-vLLM / TGI / llama.cpp, and does not claim to be faster than them; later milestones will compare
-against them with documented caveats.
+**A small LLM inference server with a real continuous-batching engine: paged KV cache, automatic
+prefix caching, chunked prefill, preemption, fair scheduling, streaming, and a benchmark harness
+that measures all of it.** Built to make the ideas behind vLLM-style serving visible, testable
+and measurable on a laptop — not to beat vLLM.
 
-**Status: Milestone 1 of 7 complete** — single-request generation with lifecycle, validation,
-token caps, cancellation, timeouts and SSE streaming. See [PLAN.md](PLAN.md) for the roadmap and
-progress log.
+![MiniServe dashboard: the paged KV cache under load, with prefix blocks shared by 10 sequences](docs/img/dashboard.png)
 
-| Doc | What's in it |
+<sub>`/dashboard` under load: one square per KV block. Orange blocks hold a 160-token system
+prompt that ten running requests share by reference; light-blue blocks are finished requests'
+prefixes kept in an LRU cache for reuse.</sub>
+
+## What's inside
+
+| | |
 |---|---|
-| [PLAN.md](PLAN.md) | Milestones, acceptance criteria, non-goals, progress log |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Request flow, threading model, cancellation/timeout paths, trade-offs |
-| [TESTING.md](TESTING.md) | How to run tests, what each test proves, latest results |
-| [BENCHMARK.md](BENCHMARK.md) | Benchmark status and methodology (no baselines yet — see why) |
-| [LICENSE_NOTES.md](LICENSE_NOTES.md) | Model and dependency licenses |
-| [docs/DEMO.md](docs/DEMO.md) | Demo walkthrough with real captured output |
+| **Own forward pass on a paged KV cache** | Llama/Qwen2/Mistral weights from Hugging Face, our ragged-batch forward (fused QKV and gate/up, gather-based paged attention, RoPE/RMSNorm matched to Transformers). Logits match Transformers within 2e-5; greedy output on SmolLM2 is **token-identical** to the Transformers backend. |
+| **Continuous batching** | Iteration-level scheduler under a token budget: decode-first, chunked prefill, recompute preemption when the KV cache runs out. |
+| **Automatic prefix caching** | Chained blake2b block hashes, ref-counted sharing, LRU eviction of cached-free blocks, invariant-checked by randomized tests. |
+| **Fairness & backpressure** | FCFS or Virtual Token Counter (OSDI'24) per tenant; per-tenant API keys, rate limits and queue limits; bounded queues by request count *and* queued tokens; KV-capacity validation up front. |
+| **Production plumbing** | OpenAI-compatible `/v1/completions` + `/v1/chat/completions` (works with the official `openai` SDK), SSE streaming with held-back stop strings, cancellation on disconnect, deadlines, Prometheus `/metrics`, JSON logs, readiness/liveness, graceful drain on SIGTERM, Docker, CI. |
+| **Measurement** | `miniserve-bench`: exact-length prompts, closed-loop and Poisson multi-tenant workloads, A/B suites with rotated config order, TTFT/TPOT/ITL/E2E percentiles, server-side batch/KV/memory sampling, Markdown + charts. |
+| **Int8 weight-only quantization** | W8A16 with per-channel scales through PyTorch's fused int8 matmul on CPU/MPS, with a quality evaluation. |
+
+## Results (SmolLM2-135M, Apple M4 GPU via MPS, fp16)
+
+Measured with `miniserve-bench` on a **shared, busy laptop** (other jobs running; load average
+recorded with every run); medians of 2 rounds with rotated order. Full tables, spreads, caveats:
+[BENCHMARK.md](BENCHMARK.md).
+
+| Question | Answer (measured) |
+|---|---|
+| Does continuous batching pay off? | At 16 concurrent clients: **197 vs 29 output tok/s** (6.8× the Transformers one-at-a-time baseline), median TTFT **0.46 s vs 32 s**; per-token latency rises from ~35 to ~73 ms |
+| Is our forward pass slower than Transformers for one stream? | Roughly at parity: 36–38 ms vs 35 ms per token at concurrency 1 |
+
+![Output throughput vs concurrency](docs/img/bench/batching_output_token_throughput.png)
 
 ## Quickstart
 
 Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync --extra hf                # server + torch/transformers + dev tools
-uv run pytest                     # toy + tiny-model tests, no downloads (~1-2 min)
-
-# Real model (downloads ~270 MB SmolLM2-135M-Instruct on first start):
-MINISERVE_API_KEY=demo-key uv run miniserve
-# No-download alternatives:
-MINISERVE_BACKEND=toy  uv run miniserve    # deterministic echo model, no torch needed
-MINISERVE_BACKEND=tiny uv run miniserve    # random 2-layer GPT-2 (gibberish, real torch path)
+make install                 # uv sync --extra hf --extra bench
+make test                    # 140+ tests, no downloads, CPU only
+MINISERVE_API_KEY=demo-key uv run miniserve        # SmolLM2-135M on MPS/CUDA/CPU (auto)
+open http://127.0.0.1:8000/dashboard
 ```
-
-Wait for readiness, then generate:
 
 ```bash
-curl -s localhost:8000/readyz        # 503 {"status":"loading"} until model is loaded + warmed up
-
-curl -s localhost:8000/v1/completions -H 'Authorization: Bearer demo-key' \
+curl -s localhost:8000/v1/chat/completions -H 'Authorization: Bearer demo-key' \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"The three primary colors are","max_tokens":24,"temperature":0}'
-
-curl -sN localhost:8000/v1/completions -H 'Authorization: Bearer demo-key' \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"List three fruits:","max_tokens":12,"temperature":0,"stream":true}'
+  -d '{"messages":[{"role":"user","content":"What is the capital of France?"}],"max_tokens":32}'
 ```
 
-## API (M1)
+```python
+from openai import OpenAI   # the official SDK works unchanged
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="demo-key")
+for chunk in client.chat.completions.create(
+        model="HuggingFaceTB/SmolLM2-135M-Instruct", stream=True,
+        messages=[{"role": "user", "content": "Write a haiku about caches."}]):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
 
-OpenAI Completions-compatible subset, so one load generator can later target MiniServe and vLLM.
+No download? `MINISERVE_BACKEND=toy` (deterministic echo model with a simulated cost model) or
+`MINISERVE_BACKEND=tiny` (random 2-layer Llama on the real engine).
 
-| Endpoint | Auth | Purpose |
+## API
+
+| Endpoint | Auth | Notes |
 |---|---|---|
-| `POST /v1/completions` | yes | `prompt`, `max_tokens`, `temperature`, `top_p`, `seed`, `stream`, `model`, and extension `timeout_s` |
-| `POST /v1/requests/{id}/cancel` | yes | Cancel a queued or running request (id from `X-Request-ID` header) |
-| `GET /v1/models` | yes | Served model id |
-| `GET /healthz` | no | Liveness (503 only if model loading failed) |
-| `GET /readyz` | no | Readiness (200 once loaded + warmed up) |
+| `POST /v1/completions`, `POST /v1/chat/completions` | yes | `max_tokens` (`max_completion_tokens`), `temperature`, `top_p`, `seed`, `stop` (≤4), `stream`, `stream_options`, `user`; extensions `ignore_eos` (vLLM name), `timeout_s`. Unknown fields → 422. |
+| `POST /v1/requests/{id}/cancel` | yes | id from the `X-Request-ID` header |
+| `GET /v1/models`, `GET /v1/engine`, `GET /v1/engine/blocks` | yes | model; live scheduler/KV state; per-block map |
+| `GET /metrics` | no | Prometheus (TTFT, TPOT, queue, E2E, step time, batch size, KV usage, prefix hit rate, preemptions, memory) |
+| `GET /healthz`, `GET /readyz`, `GET /dashboard` | no | liveness, readiness (503 while loading/draining), live dashboard |
 
-- **finish_reason**: `stop` (EOS), `length` (`max_tokens`), plus MiniServe-specific `cancelled`
-  and `timeout`.
-- **Streaming**: `text/event-stream`, one `data: {json}` chunk per stable text delta, a final chunk
-  carrying `finish_reason`, `usage` and server timings, then `data: [DONE]`. Errors after the
-  stream has started are reported in-band (HTTP status is already 200).
-- **Non-stream timeouts** return 504 with the partial completion under `partial`.
-- **Unknown request fields are rejected** (422), e.g. `n`, `logprobs`, `stop` — not silently
-  ignored.
-- Every response includes `miniserve.timings`: `queue_ms`, `ttft_ms`, `total_ms`,
-  `decode_tokens_per_s` (server-side, measured from request arrival).
+`finish_reason` is `stop`, `length`, or MiniServe's `cancelled` / `timeout`. Responses carry
+`usage.prompt_tokens_details.cached_tokens` and server-side timings under `miniserve`.
 
-## Safety defaults
+## Configuration (environment, see [.env.example](.env.example))
 
-- Binds `127.0.0.1` by default; **refuses to start on a non-loopback host without
-  `MINISERVE_API_KEY`** (override only with `MINISERVE_ALLOW_UNAUTHENTICATED_PUBLIC=1` behind a
-  trusted gateway).
-- Bearer-token auth when a key is set (constant-time comparison); probes stay unauthenticated.
-- Per-client-IP token-bucket rate limit (429 + `Retry-After`), prompt character/token caps,
-  server-wide `max_tokens` cap, context-window check, per-request deadline, bounded wait queue
-  (503 + `Retry-After` on overflow).
-- Still not meant for direct Internet exposure: no TLS, single shared key, in-memory limits.
+| Variable | Default | |
+|---|---|---|
+| `MINISERVE_BACKEND` | `native` | `native` (our engine) · `hf` (Transformers baseline) · `toy` · `tiny` |
+| `MINISERVE_MODEL_ID` / `_REVISION` | SmolLM2-135M-Instruct @ pinned SHA | any Llama/Qwen2/Mistral for `native`, any causal LM for `hf` |
+| `MINISERVE_DEVICE` / `_DTYPE` | `auto` | cuda → mps → cpu; fp16 on GPU, fp32 on CPU |
+| `MINISERVE_MAX_NUM_SEQS` | 32 | running batch size |
+| `MINISERVE_MAX_NUM_BATCHED_TOKENS` | 512 | per-step token budget (chunk size for long prompts) |
+| `MINISERVE_KV_CACHE_MB` / `_BLOCK_SIZE` | 256 / 16 | paged KV cache size and block size |
+| `MINISERVE_ENABLE_PREFIX_CACHING` / `_CHUNKED_PREFILL` | true / true | |
+| `MINISERVE_SCHEDULING_POLICY` | `fcfs` | or `fair` (Virtual Token Counter per tenant) |
+| `MINISERVE_QUANTIZATION` | `none` | `int8` weight-only (native backend) |
+| `MINISERVE_API_KEY` / `_API_KEYS` | – | single key, or `tenant:key,...` for multi-tenant |
+| `MINISERVE_MAX_WAITING` / `_PER_TENANT` / `MAX_QUEUED_TOKENS` | 256 / 64 / 262144 | backpressure |
+| `MINISERVE_REQUEST_TIMEOUT_S` / `_DRAIN_TIMEOUT_S` | 120 / 30 | |
 
-All settings are environment variables; see [.env.example](.env.example).
+Safety: binds `127.0.0.1` by default and **refuses to start on a public address without an API
+key**; per-tenant rate limits and token caps are on by default. Still: put it behind a real
+gateway (TLS, auth) before exposing it.
 
-## Project layout
+## How it works
+
+[ARCHITECTURE.md](ARCHITECTURE.md) has the diagrams: request lifecycle, the per-step scheduling
+algorithm, the paged KV layout and prefix-cache hashing, the threading model, and an honest gap
+analysis against vLLM's PagedAttention kernels.
 
 ```
 src/miniserve/
-  config.py        Settings (MINISERVE_* env vars), bind-safety check
-  schemas.py       Request model (OpenAI subset + timeout_s)
-  server.py        FastAPI app: lifecycle, auth, limits, JSON + SSE responses
-  engine.py        Request handles, FIFO, worker thread, cancellation, deadlines
-  detokenizer.py   Incremental (streaming-safe) detokenization
-  ratelimit.py     Token-bucket limiter with bounded memory
-  backends/        toy (echo, no torch), hf (Transformers + manual KV-cache decode loop)
-tests/             toy, tiny-random-GPT-2, live-uvicorn, opt-in real-model tests
+  server.py         FastAPI app: auth/tenancy, limits, completions + chat, SSE, probes, dashboard
+  engine.py         asyncio front end + worker thread step loop, cancellation, deadlines, admission
+  scheduler.py      continuous batching: decode-first, chunked prefill, preemption
+  policy.py         FCFS and Virtual Token Counter fair queueing
+  block_manager.py  paged KV allocator + automatic prefix caching
+  backends/         native (our paged Llama), hf (Transformers baseline), toy
+  sampling.py  detokenizer.py  stop.py  metrics.py  ratelimit.py  logging_setup.py
+  bench/            load generator, suites, reports
+bench/              suite definitions, step profiler, quantization quality eval
 ```
+
+## Documentation
+
+| | |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | design, diagrams, trade-offs, limitations |
+| [BENCHMARK.md](BENCHMARK.md) | methodology, all results, bottleneck analysis, comparison caveats |
+| [TESTING.md](TESTING.md) | test layers, what each proves, mutation checks, bugs found |
+| [PLAN.md](PLAN.md) | milestones, acceptance criteria, non-goals, progress log |
+| [docs/DEMO.md](docs/DEMO.md) | walkthrough with captured output |
+| [LICENSE_NOTES.md](LICENSE_NOTES.md) | model/dependency licenses, papers the ideas come from |
+
+## What this is not
+
+Not a vLLM/TGI/llama.cpp replacement: no fused attention kernels, CUDA graphs, tensor
+parallelism, speculative decoding, LoRA, logprobs or multi-node anything. Single-stream speed is
+bounded by Python kernel-launch overhead (~900 kernel launches per decode step); the point is
+the scheduling and memory-management machinery around the model, built and measured in the open.

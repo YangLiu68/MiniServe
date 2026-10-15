@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniServe engine</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --surface-2: #f1f0ed; --border: #e6e5e1;
+    --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #7d7b76;
+    --free: #e6e5e1; --cached: #a9c7ee; --used: #2a78d6; --shared: #eb6834;
+    --s1: #2a78d6; --s2: #eb6834;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19; --surface-2: #242423; --border: #34332f;
+      --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #96958c;
+      --free: #34332f; --cached: #2c4a72; --used: #3987e5; --shared: #d95926;
+      --s1: #3987e5; --s2: #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 24px 0 8px;
+       text-transform: uppercase; letter-spacing: .04em; }
+  .muted { color: var(--ink-3); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+           gap: 8px; margin-top: 16px; }
+  .tile { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
+  .tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .k { font-size: 12px; color: var(--ink-2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--ink-2);
+            margin-bottom: 8px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+        margin-right: 6px; vertical-align: -1px; }
+  #grid { width: 100%; display: block; }
+  #tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--surface);
+         font-size: 12px; padding: 4px 8px; border-radius: 4px; display: none; }
+  svg text { fill: var(--ink-2); font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums;
+          font-size: 13px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--ink-2); font-weight: 600; }
+  .err { color: var(--shared); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>MiniServe engine</h1>
+    <span class="muted" id="model">connecting…</span>
+    <span class="err" id="error"></span>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>Paged KV cache — one square per block</h2>
+  <div class="legend" id="legend"></div>
+  <canvas id="grid" height="100" aria-label="KV cache block map"></canvas>
+
+  <h2>Requests over the last minute</h2>
+  <div class="legend">
+    <span><span class="sw" style="background:var(--s1)"></span>running</span>
+    <span><span class="sw" style="background:var(--s2)"></span>waiting</span>
+  </div>
+  <svg id="ts" width="100%" height="140" role="img" aria-label="running and waiting requests"></svg>
+
+  <h2>Running sequences</h2>
+  <table>
+    <thead><tr><th>request</th><th>tenant</th><th>tokens</th><th>KV computed</th>
+      <th>blocks</th><th>prefix-cached</th><th>preempted</th></tr></thead>
+    <tbody id="seqs"></tbody>
+  </table>
+</main>
+<div id="tip"></div>
+<script>
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let key = sessionStorage.getItem("miniserve-key") || "";
+const history = [];
+let last = null, lastSteps = null, lastT = null, states = "";
+
+async function get(path) {
+  const r = await fetch(path, { headers: key ? { Authorization: "Bearer " + key } : {} });
+  if (r.status === 401) {
+    key = prompt("API key for this MiniServe server") || "";
+    sessionStorage.setItem("miniserve-key", key);
+    throw new Error("unauthorized");
+  }
+  if (!r.ok) throw new Error((await r.json()).error?.message || r.statusText);
+  return r.json();
+}
+
+function tiles(b, info) {
+  const used = [...b.states].filter((c) => /[1-9]/.test(c)).length;  // not "c" >= "1"!
+  const cached = [...b.states].filter((c) => c === "c").length;
+  const now = performance.now();
+  const sps = lastSteps === null ? 0 : (b.steps - lastSteps) / ((now - lastT) / 1000);
+  lastSteps = b.steps; lastT = now;
+  const hit = b.prefix_queried_tokens ? b.prefix_hit_tokens / b.prefix_queried_tokens : 0;
+  const items = [
+    ["running", b.running.length], ["waiting", b.waiting],
+    ["KV blocks in use", `${(100 * used / b.states.length).toFixed(0)}%`],
+    ["cached blocks", cached], ["prefix hit rate", `${(100 * hit).toFixed(0)}%`],
+    ["engine steps / s", sps.toFixed(1)], ["preemptions", b.preemptions],
+  ];
+  document.getElementById("tiles").innerHTML = items.map(([k, v]) =>
+    `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("");
+  const counts = { free: 0, cached: 0, used: 0, shared: 0 };
+  for (const c of b.states) counts[c === "." ? "free" : c === "c" ? "cached" : c === "1" ? "used" : "shared"]++;
+  document.getElementById("legend").innerHTML = [
+    ["--free", "free", counts.free], ["--cached", "cached, evictable (prefix cache)", counts.cached],
+    ["--used", "in use", counts.used], ["--shared", "shared by ≥2 sequences", counts.shared],
+  ].map(([v, k, n]) => `<span><span class="sw" style="background:var(${v})"></span>${k} · ${n}</span>`)
+   .join("") + `<span class="muted">block size ${b.block_size} tokens</span>`;
+}
+
+function layout(canvas, n) {
+  const w = canvas.clientWidth, cell = n > 4000 ? 7 : n > 1500 ? 10 : 14, gap = 2;
+  const cols = Math.max(1, Math.floor((w + gap) / (cell + gap)));
+  return { cell, gap, cols, rows: Math.ceil(n / cols) };
+}
+
+function drawGrid(s) {
+  const c = document.getElementById("grid"), ctx = c.getContext("2d");
+  const L = layout(c, s.length), dpr = window.devicePixelRatio || 1;
+  const h = L.rows * (L.cell + L.gap);
+  c.style.height = h + "px"; c.width = c.clientWidth * dpr; c.height = h * dpr;
+  ctx.scale(dpr, dpr);
+  const col = { ".": css("--free"), c: css("--cached"), 1: css("--used") };
+  for (let i = 0; i < s.length; i++) {
+    const x = (i % L.cols) * (L.cell + L.gap), y = Math.floor(i / L.cols) * (L.cell + L.gap);
+    ctx.fillStyle = col[s[i]] || css("--shared");
+    ctx.beginPath(); ctx.roundRect(x, y, L.cell, L.cell, 2); ctx.fill();
+  }
+}
+
+function drawSeries() {
+  const svg = document.getElementById("ts"), W = svg.clientWidth, H = 140, P = 28;
+  const max = Math.max(4, ...history.map((p) => Math.max(p.r, p.w)));
+  const x = (i) => P + (i / 119) * (W - P - 8), y = (v) => H - 18 - (v / max) * (H - 30);
+  const line = (k) => history.map((p, i) => `${i ? "L" : "M"}${x(i + 120 - history.length)},${y(p[k])}`).join("");
+  svg.innerHTML = `
+    <line x1="${P}" x2="${W - 8}" y1="${y(0)}" y2="${y(0)}" stroke="${css("--border")}"/>
+    <line x1="${P}" x2="${W - 8}" y1="${y(max)}" y2="${y(max)}" stroke="${css("--border")}"/>
+    <text x="${P - 6}" y="${y(0) + 4}" text-anchor="end">0</text>
+    <text x="${P - 6}" y="${y(max) + 4}" text-anchor="end">${max}</text>
+    <path d="${line("w")}" fill="none" stroke="${css("--s2")}" stroke-width="2" stroke-linejoin="round"/>
+    <path d="${line("r")}" fill="none" stroke="${css("--s1")}" stroke-width="2" stroke-linejoin="round"/>`;
+}
+
+function table(b) {
+  document.getElementById("seqs").innerHTML = b.running.length ? b.running.map((s) =>
+    `<tr><td>…${s.id}</td><td>${s.tenant}</td><td>${s.tokens}</td><td>${s.computed}</td>
+     <td>${s.blocks}</td><td>${s.cached_tokens}</td><td>${s.preemptions}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted" style="text-align:left">idle</td></tr>`;
+}
+
+async function tick() {
+  try {
+    if (!last) {
+      const info = await get("/v1/engine");
+      document.getElementById("model").textContent =
+        `${info.model} · ${info.backend} on ${info.device}${info.dtype ? ` (${info.dtype})` : ""}` +
+        ` · policy ${info.config.policy}`;
+      last = info;
+    }
+    const b = await get("/v1/engine/blocks");
+    states = b.states;
+    history.push({ r: b.running.length, w: b.waiting });
+    if (history.length > 120) history.shift();
+    tiles(b, last); drawGrid(b.states); drawSeries(); table(b);
+    document.getElementById("error").textContent = "";
+  } catch (e) {
+    document.getElementById("error").textContent = e.message;
+  }
+}
+
+const grid = document.getElementById("grid"), tip = document.getElementById("tip");
+grid.addEventListener("mousemove", (ev) => {
+  const L = layout(grid, states.length), r = grid.getBoundingClientRect();
+  const col = Math.floor((ev.clientX - r.left) / (L.cell + L.gap));
+  const row = Math.floor((ev.clientY - r.top) / (L.cell + L.gap));
+  const i = row * L.cols + col;
+  if (col >= L.cols || i < 0 || i >= states.length) { tip.style.display = "none"; return; }
+  const s = states[i];
+  tip.textContent = `block ${i}: ` + (s === "." ? "free" : s === "c" ? "cached (evictable)"
+    : s === "1" ? "in use" : `shared by ${s === "9" ? "≥9" : s} sequences`);
+  tip.style.left = ev.clientX + 12 + "px"; tip.style.top = ev.clientY + 12 + "px";
+  tip.style.display = "block";
+});
+grid.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+tick(); setInterval(tick, 500);
+</script>
+</body>
+</html>

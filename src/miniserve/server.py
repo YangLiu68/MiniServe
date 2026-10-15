@@ -11,11 +11,12 @@ import logging
 import math
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from miniserve import __version__
 from miniserve.backends import Backend, SamplingParams, load_backend
@@ -401,6 +402,52 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
             },
             "memory": b.memory_stats(),
         }
+
+    @app.get("/v1/engine/blocks", dependencies=[Depends(tenant_of)])
+    async def engine_blocks() -> dict[str, Any]:
+        """Per-block KV cache state for the dashboard: '.' free, 'c' cached (evictable),
+        '1'-'9' in use with that many sharers (capped at 9)."""
+        e, _ = state.require_ready()
+        bm = e.block_manager
+        for _ in range(10):  # the worker may mutate the dicts mid-copy; retry the snapshot
+            try:
+                refs = list(bm._ref)
+                cached = set(bm._evictable)
+                running = list(e.scheduler.running)
+                break
+            except RuntimeError:
+                await asyncio.sleep(0.001)
+        else:
+            raise APIError(503, "engine busy, retry", "service_unavailable")
+        states = "".join(
+            str(min(r, 9)) if r else ("c" if b in cached else ".") for b, r in enumerate(refs)
+        )
+        seqs = [
+            {
+                "id": s.request_id[-6:],
+                "tenant": s.tenant,
+                "tokens": s.num_tokens,
+                "computed": s.num_computed,
+                "blocks": len(s.block_ids),
+                "cached_tokens": s.num_cached_tokens,
+                "preemptions": s.num_preemptions,
+            }
+            for s in running
+        ]
+        return {
+            "block_size": bm.block_size,
+            "states": states,
+            "running": seqs,
+            "waiting": e.scheduler.num_waiting,
+            "steps": e.num_steps,
+            "preemptions": e.scheduler.num_preemptions,
+            "prefix_hit_tokens": bm.stats.hit_tokens,
+            "prefix_queried_tokens": bm.stats.queried_tokens,
+        }
+
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard() -> HTMLResponse:
+        return HTMLResponse((Path(__file__).parent / "static" / "dashboard.html").read_text())
 
     @app.post("/v1/requests/{request_id}/cancel", dependencies=[Depends(tenant_of)])
     async def cancel_request(request_id: str) -> dict[str, Any]:

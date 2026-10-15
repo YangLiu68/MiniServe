@@ -1,0 +1,85 @@
+{
+  "name": "external-ollama",
+  "description": "M5 - same workload against Ollama (llama.cpp + Metal kernels) serving the same model in fp16 (smollm2:135m-instruct-fp16) on the same Mac. Both servers are driven as plain OpenAI clients (greedy, natural EOS, no ignore_eos) because Ollama cannot force output length. Ollama runs with OLLAMA_NUM_PARALLEL=16. See BENCHMARK.md for the (many) caveats.",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "client_kind": "openai",
+  "rounds": 2,
+  "port": 8100,
+  "base_env": {
+    "MINISERVE_BACKEND": "native",
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_ENABLE_PREFIX_CACHING": "false",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4"
+  },
+  "configs": [
+    {
+      "name": "miniserve-native",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32"
+      }
+    },
+    {
+      "name": "ollama",
+      "external": {
+        "base_url": "http://127.0.0.1:11434",
+        "model": "smollm2:135m-instruct-fp16",
+        "kind": "openai"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "external-c1",
+      "group": "external",
+      "x": 1,
+      "seed": 11,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 6,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    },
+    {
+      "name": "external-c4",
+      "group": "external",
+      "x": 4,
+      "seed": 14,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 4,
+          "num_requests": 12,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    },
+    {
+      "name": "external-c16",
+      "group": "external",
+      "x": 16,
+      "seed": 26,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 16,
+          "num_requests": 32,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    }
+  ]
+}

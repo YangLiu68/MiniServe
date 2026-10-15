@@ -171,6 +171,7 @@ def sweep_charts(
         fig, ax = plt.subplots(figsize=(6.4, 3.8), dpi=150)
         fig.patch.set_facecolor(SURFACE)
         _style_axes(ax)
+        ends = []
         for i, cfg in enumerate(configs):
             pts = sorted(
                 (a["x"], a[metric][0])
@@ -192,14 +193,16 @@ def sweep_charts(
                 zorder=3,
             )
             ax.scatter(xs, ys, s=36, color=color, edgecolors=SURFACE, linewidths=2, zorder=4)
-            ax.annotate(
-                cfg,
-                (xs[-1], ys[-1]),
-                xytext=(6, 0),
-                textcoords="offset points",
-                va="center",
-                fontsize=8,
-                color=INK_2,
+            ends.append(
+                ax.annotate(
+                    cfg,
+                    (xs[-1], ys[-1]),
+                    xytext=(6, 0),
+                    textcoords="offset points",
+                    va="center",
+                    fontsize=8,
+                    color=INK_2,
+                )
             )
         xs_all = sorted({a["x"] for a in agg.values() if a["group"] == group})
         ax.set_xscale("log", base=2)
@@ -214,6 +217,12 @@ def sweep_charts(
         ax.set_title(f"{group}: {ylabel}", color=INK, fontsize=10, loc="left")
         ax.legend(frameon=False, fontsize=8, labelcolor=INK_2)
         fig.tight_layout()
+        # Converging lines: overlapping end labels are dropped (the legend carries identity)
+        # rather than nudged away from the lines they name.
+        ys_px = sorted(ax.transData.transform(a.xy)[1] for a in ends)
+        if any(b - a < 14 for a, b in zip(ys_px, ys_px[1:], strict=False)):
+            for a in ends:
+                a.remove()
         path = out_dir / f"{group}_{slug}.png"
         fig.savefig(path, facecolor=SURFACE)
         plt.close(fig)
