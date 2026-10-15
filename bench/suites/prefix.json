@@ -1,0 +1,49 @@
+{
+  "name": "prefix",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "rounds": 2,
+  "port": 8100,
+  "description": "M4 - automatic prefix caching. Every request shares a 1024-token system prompt and adds a unique ~24-token question (16 output tokens); 4 closed-loop clients. Continuous batching on in both configs.",
+  "configs": [
+    {
+      "name": "prefix-cache-off",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+      }
+    },
+    {
+      "name": "prefix-cache-on",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "true"
+      }
+    }
+  ],
+  "base_env": {
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_MAX_WAITING_PER_TENANT": "1024",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4",
+    "MINISERVE_BACKEND": "native"
+  },
+  "scenarios": [
+    {
+      "name": "shared-system-prompt",
+      "seed": 3,
+      "streams": [
+        {
+          "tenant": "app",
+          "mode": "closed",
+          "concurrency": 4,
+          "num_requests": 24,
+          "prompt_tokens": 1048,
+          "max_tokens": 16,
+          "shared_prefix_tokens": 1024
+        }
+      ]
+    }
+  ]
+}

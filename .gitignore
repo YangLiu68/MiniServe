@@ -10,3 +10,5 @@ build/
 results/raw/
 *.log
 .DS_Store
+results/*/check/
+results/*/smoke*/

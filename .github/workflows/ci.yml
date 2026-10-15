@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.17.0 check src tests bench
+      - run: uvx ruff@0.17.0 format --check src tests bench
+
+  test:
+    name: test (py${{ matrix.python }}, torch CPU)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --frozen --extra hf --extra bench
+      # toy + tiny random models only: no downloads, no GPU, no secrets
+      - run: uv run pytest -q --durations=10
+      - name: Benchmark pipeline smoke test (toy backend)
+        run: |
+          uv run miniserve-bench suite bench/suites/toy-batching.json --out results/ci
+          uv run miniserve-bench report results/ci --out results/ci/report.md
+          cat results/ci/report.md >> "$GITHUB_STEP_SUMMARY"
+
+  core-without-torch:
+    # The server, scheduler and toy backend must work without the optional torch extra.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run python -c "import importlib.util as u; assert u.find_spec('torch') is None"
+      - run: uv run pytest -q -m "not torch and not real_model"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: miniserve:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Refuses to start publicly without an API key
+        run: |
+          set +e
+          docker run --rm miniserve:ci; code=$?
+          test "$code" -eq 2
+      - name: Smoke test (toy backend, authenticated)
+        run: |
+          docker run -d --name ms -p 8000:8000 -e MINISERVE_BACKEND=toy \
+            -e MINISERVE_API_KEY=ci-key miniserve:ci
+          for i in $(seq 1 60); do curl -fs localhost:8000/readyz && break; sleep 1; done
+          curl -fs localhost:8000/v1/completions -H 'Authorization: Bearer ci-key' \
+            -H 'Content-Type: application/json' -d '{"prompt":"hello","max_tokens":5}'
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/completions \
+            -H 'Content-Type: application/json' -d '{"prompt":"x"}')" = 401
+          curl -fs localhost:8000/metrics | grep -q miniserve_requests_total
+          docker stop ms
+          docker logs ms | tail -5

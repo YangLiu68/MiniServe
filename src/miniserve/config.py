@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     dtype: Literal["auto", "float32", "float16", "bfloat16"] = "auto"
     max_model_len: int = Field(4096, ge=16)  # caps the context window (and the RoPE table)
+    # Weight-only int8 (W8A16) for the native backend; KV cache and activations unchanged.
+    quantization: Literal["none", "int8"] = "none"
     warmup: bool = True
     torch_threads: int | None = Field(None, ge=1)
 

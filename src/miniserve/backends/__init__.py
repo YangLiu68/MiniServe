@@ -36,15 +36,28 @@ def load_backend(settings: Settings) -> Backend:
         _, hf_model = build_tiny_random(device=resolve_device(settings.device))
         from miniserve.backends.toy import ByteTokenizer
 
-        return NativeBackend.from_hf_model(hf_model, ByteTokenizer(), "tiny-random-llama", **kv)
+        return NativeBackend.from_hf_model(
+            hf_model,
+            ByteTokenizer(),
+            "tiny-random-llama",
+            **kv,
+            quantization=settings.quantization,
+        )
     if settings.backend == "hf":
         from miniserve.backends.hf import HFBackend
 
+        if settings.quantization != "none":
+            raise ValueError("quantization is only implemented for the native backend")
         return HFBackend.from_pretrained(
             settings.model_id, settings.model_revision, settings.device, settings.dtype, **kv
         )
     from miniserve.backends.native import NativeBackend
 
     return NativeBackend.from_pretrained(
-        settings.model_id, settings.model_revision, settings.device, settings.dtype, **kv
+        settings.model_id,
+        settings.model_revision,
+        settings.device,
+        settings.dtype,
+        **kv,
+        quantization=settings.quantization,
     )

@@ -159,3 +159,35 @@ def test_unsupported_architecture_is_rejected():
     m = GPT2LMHeadModel(GPT2Config(n_layer=1, n_embd=32, n_head=2, vocab_size=50))
     with pytest.raises((UnsupportedModel, AttributeError)):
         NativeLlama(m)
+
+
+def test_int8_weight_only_quantization_is_close_and_smaller():
+    from miniserve.backends import native as nat
+
+    fp, hf = build_tiny_random(arch="llama", block_size=4, seed=1)
+    q, _ = build_tiny_random(arch="llama", block_size=4, seed=1)
+    q.model.quantize_int8()
+    assert q.model.weight_bytes() < 0.4 * fp.model.weight_bytes()  # fp32 -> int8 (+ scales)
+    bm_fp = BlockManager(fp.num_kv_blocks, 4, False)
+    bm_q = BlockManager(q.num_kv_blocks, 4, False)
+    agree = total = 0
+    for k in range(6):
+        ids = prompt(12 + k, base=k)
+        a, b = new_seq(bm_fp, ids, f"f{k}"), new_seq(bm_q, ids, f"q{k}")
+        la = native_logits(fp, [(a, 0, len(ids))])[0]
+        lb = native_logits(q, [(b, 0, len(ids))])[0]
+        cos = torch.nn.functional.cosine_similarity(la, lb, dim=0)
+        assert cos > 0.999, float(cos)
+        agree += int(la.argmax() == lb.argmax())
+        total += 1
+    assert agree >= total - 1
+    # the dequantize fallback computes the same thing as the fused int8 kernel
+    s = new_seq(bm_q, prompt(9), "fb")
+    fused = native_logits(q, [(s, 0, 9)])[0]
+    saved = dict(nat._INT8_MM_OK)
+    try:
+        nat._INT8_MM_OK.update({k: False for k in nat._INT8_MM_OK})
+        fallback = native_logits(q, [(s, 0, 9)])[0]
+    finally:
+        nat._INT8_MM_OK.update(saved)
+    torch.testing.assert_close(fused, fallback, atol=1e-4, rtol=1e-4)

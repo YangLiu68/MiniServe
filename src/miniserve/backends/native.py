@@ -60,6 +60,59 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 @dataclass
+class Int8Weight:
+    """Weight-only int8 quantization (W8A16): symmetric, one scale per output channel.
+
+    ``q`` is int8 [out, in]; ``scale`` is [out] in the compute dtype; W ~= q * scale[:, None].
+    Activations stay in fp16/bf16/fp32. Per-output-channel scales make the matmul
+    ``(x @ q.T) * scale``, which PyTorch fuses in ``torch._weight_int8pack_mm`` on CPU/MPS.
+    """
+
+    q: torch.Tensor
+    scale: torch.Tensor
+
+    @classmethod
+    def from_float(cls, w: torch.Tensor) -> Int8Weight:
+        w32 = w.float()
+        scale = w32.abs().amax(dim=1).clamp(min=1e-8) / 127.0
+        q = torch.round(w32 / scale[:, None]).clamp(-127, 127).to(torch.int8)
+        return cls(q.contiguous(), scale.to(w.dtype))
+
+    @property
+    def nbytes(self) -> int:
+        return self.q.numel() + self.scale.numel() * self.scale.element_size()
+
+    def dequantize_rows(self, rows: torch.Tensor) -> torch.Tensor:
+        return self.q[rows].to(self.scale.dtype) * self.scale[rows, None]
+
+
+_INT8_MM_OK: dict[tuple[str, torch.dtype], bool] = {}
+
+
+def _int8_mm_supported(device: torch.device, dtype: torch.dtype) -> bool:
+    key = (device.type, dtype)
+    if key not in _INT8_MM_OK:
+        try:
+            x = torch.ones(2, 32, device=device, dtype=dtype)
+            w = torch.ones(8, 32, device=device, dtype=torch.int8)
+            torch._weight_int8pack_mm(x, w, torch.ones(8, device=device, dtype=dtype))
+            _INT8_MM_OK[key] = True
+        except Exception:  # pragma: no cover - depends on torch build/device
+            _INT8_MM_OK[key] = False
+    return _INT8_MM_OK[key]
+
+
+def linear(x: torch.Tensor, w, b: torch.Tensor | None = None) -> torch.Tensor:
+    if isinstance(w, Int8Weight):
+        if _int8_mm_supported(x.device, x.dtype):
+            y = torch._weight_int8pack_mm(x, w.q, w.scale)
+        else:  # dequantize-on-the-fly fallback
+            y = F.linear(x, w.q.to(x.dtype)) * w.scale
+        return y if b is None else y + b
+    return F.linear(x, w, b)
+
+
+@dataclass
 class Layer:
     ln1: torch.Tensor
     ln2: torch.Tensor
@@ -238,6 +291,7 @@ class NativeLlama:
         scale = float(getattr(rotary, "attention_scaling", 1.0))
         self.cos = (emb.cos() * scale).to(device=self.device, dtype=self.dtype)
         self.sin = (emb.sin() * scale).to(device=self.device, dtype=self.dtype)
+        self.quantization = "none"
         self._probe_gqa()
 
     def _probe_gqa(self) -> None:
@@ -258,7 +312,33 @@ class NativeLlama:
         ts = [self.embed, self.norm] + ([] if self.lm_head is self.embed else [self.lm_head])
         for L in self.layers:
             ts += [t for t in vars(L).values() if t is not None]
-        return sum(t.numel() * t.element_size() for t in ts)
+        seen, total = set(), 0
+        for t in ts:
+            if id(t) in seen:
+                continue
+            seen.add(id(t))
+            total += t.nbytes if isinstance(t, Int8Weight) else t.numel() * t.element_size()
+        return total
+
+    def embed_tokens(self, ids: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.embed, Int8Weight):
+            return self.embed.dequantize_rows(ids)
+        return F.embedding(ids, self.embed)
+
+    def quantize_int8(self) -> None:
+        """Replace every projection (and the LM head / embedding) with int8 weights.
+
+        Norm weights, biases and the KV cache stay in the compute dtype. A tied LM head and
+        embedding share one int8 tensor: per-row scales serve both the matmul (per output
+        channel = per vocab row) and the embedding lookup (dequantize the looked-up rows).
+        """
+        tied = self.lm_head is self.embed
+        for L in self.layers:
+            for name in ("wqkv", "wo", "wgu", "wdown"):
+                setattr(L, name, Int8Weight.from_float(getattr(L, name)))
+        self.lm_head = Int8Weight.from_float(self.lm_head)
+        self.embed = self.lm_head if tied else Int8Weight.from_float(self.embed)
+        self.quantization = "int8"
 
     def attention(self, q, k_cache, v_cache, meta: StepMetadata) -> torch.Tensor:
         T, H, D = q.shape
@@ -288,13 +368,13 @@ class NativeLlama:
     def forward(self, meta: StepMetadata, kv: PagedKVCache) -> torch.Tensor:
         """Run one ragged step; returns logits [S, vocab] for ``meta.sample_index`` rows."""
         H, KVH, D = self.num_heads, self.num_kv_heads, self.head_dim
-        h = F.embedding(meta.input_ids, self.embed)
+        h = self.embed_tokens(meta.input_ids)
         T = h.shape[0]
         cos = self.cos[meta.positions][:, None, :]
         sin = self.sin[meta.positions][:, None, :]
         for li, layer in enumerate(self.layers):
             x = rms_norm(h, layer.ln1, self.eps)
-            q, k, v = F.linear(x, layer.wqkv, layer.bqkv).split([H * D, KVH * D, KVH * D], dim=-1)
+            q, k, v = linear(x, layer.wqkv, layer.bqkv).split([H * D, KVH * D, KVH * D], dim=-1)
             q = q.reshape(T, H, D)
             k = k.reshape(T, KVH, D)
             v = v.reshape(T, KVH, D)
@@ -303,12 +383,12 @@ class NativeLlama:
             kv.k[li].index_copy_(0, meta.slot_mapping, k)
             kv.v[li].index_copy_(0, meta.slot_mapping, v)
             attn = self.attention(q, kv.k[li], kv.v[li], meta)
-            h = h + F.linear(attn.reshape(T, H * D), layer.wo, layer.bo)
+            h = h + linear(attn.reshape(T, H * D), layer.wo, layer.bo)
             x = rms_norm(h, layer.ln2, self.eps)
-            gate, up = F.linear(x, layer.wgu, layer.bgu).chunk(2, dim=-1)
-            h = h + F.linear(F.silu(gate) * up, layer.wdown, layer.bdown)
+            gate, up = linear(x, layer.wgu, layer.bgu).chunk(2, dim=-1)
+            h = h + linear(F.silu(gate) * up, layer.wdown, layer.bdown)
         hs = rms_norm(h[meta.sample_index], self.norm, self.eps)
-        return F.linear(hs, self.lm_head)
+        return linear(hs, self.lm_head)
 
 
 class NativeBackend:
@@ -328,6 +408,8 @@ class NativeBackend:
         self.model_id = model_id
         self.device = str(model.device.type)
         self.dtype = str(model.dtype).removeprefix("torch.")
+        if model.quantization != "none":
+            self.dtype += f"+w{model.quantization}"
         self.max_context = model.max_context
         self.block_size = block_size
         self.num_kv_blocks = num_kv_blocks
@@ -351,9 +433,20 @@ class NativeBackend:
 
     @classmethod
     def from_hf_model(
-        cls, hf_model, tokenizer, model_id, kv_cache_mb=256.0, block_size=16, max_context=None
+        cls,
+        hf_model,
+        tokenizer,
+        model_id,
+        kv_cache_mb=256.0,
+        block_size=16,
+        max_context=None,
+        quantization: str = "none",
     ) -> NativeBackend:
         model = NativeLlama(hf_model, max_context)
+        if quantization == "int8":
+            model.quantize_int8()
+        elif quantization != "none":
+            raise ValueError(f"unknown quantization {quantization!r}")
         blocks = cls.blocks_for_budget(model, kv_cache_mb, block_size)
         return cls(model, tokenizer, model_id, blocks, block_size)
 
@@ -367,10 +460,13 @@ class NativeBackend:
         kv_cache_mb=256.0,
         block_size=16,
         max_context=None,
+        quantization="none",
     ) -> NativeBackend:
         dev = resolve_device(device)
         hf_model, tok = load_hf_model(model_id, revision, dev, resolve_dtype(dtype, dev))
-        backend = cls.from_hf_model(hf_model, tok, model_id, kv_cache_mb, block_size, max_context)
+        backend = cls.from_hf_model(
+            hf_model, tok, model_id, kv_cache_mb, block_size, max_context, quantization
+        )
         del hf_model  # our fused copies replace the per-projection weights
         gc.collect()
         return backend

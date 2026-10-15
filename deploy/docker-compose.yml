@@ -1,0 +1,20 @@
+# MiniServe + Prometheus. Not exercised locally (Docker is not installed on the dev machine);
+# CI builds the image and smoke-tests it. Usage:
+#   MINISERVE_API_KEY=change-me docker compose -f deploy/docker-compose.yml up --build
+services:
+  miniserve:
+    build: ..
+    ports: ["8000:8000"]
+    environment:
+      MINISERVE_API_KEY: ${MINISERVE_API_KEY:?set MINISERVE_API_KEY}
+      MINISERVE_BACKEND: ${MINISERVE_BACKEND:-native}
+      MINISERVE_KV_CACHE_MB: "512"
+    volumes: ["hf-cache:/home/miniserve/.cache/huggingface"]
+    stop_grace_period: 45s
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports: ["9090:9090"]
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    depends_on: [miniserve]
+volumes:
+  hf-cache:

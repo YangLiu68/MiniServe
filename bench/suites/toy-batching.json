@@ -1,0 +1,76 @@
+{
+  "name": "toy-batching",
+  "description": "Toy backend with a GPU-like cost model (20 ms per step + 0.2 ms per decode token + 0.05 ms per prefill token). Validates the scheduler and the benchmark pipeline; says nothing about real model speed.",
+  "tokenizer": "bytes",
+  "rounds": 1,
+  "base_env": {
+    "MINISERVE_BACKEND": "toy",
+    "MINISERVE_TOY_STEP_OVERHEAD_MS": "20",
+    "MINISERVE_TOY_DECODE_MS_PER_TOKEN": "0.2",
+    "MINISERVE_TOY_PREFILL_MS_PER_TOKEN": "0.05"
+  },
+  "configs": [
+    {
+      "name": "sequential",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "1"
+      }
+    },
+    {
+      "name": "continuous-batching",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "toy-sweep-c1",
+      "group": "toy-sweep",
+      "x": 1,
+      "seed": 1,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 16,
+          "prompt_tokens": 64,
+          "max_tokens": 32
+        }
+      ]
+    },
+    {
+      "name": "toy-sweep-c4",
+      "group": "toy-sweep",
+      "x": 4,
+      "seed": 4,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 4,
+          "num_requests": 16,
+          "prompt_tokens": 64,
+          "max_tokens": 32
+        }
+      ]
+    },
+    {
+      "name": "toy-sweep-c16",
+      "group": "toy-sweep",
+      "x": 16,
+      "seed": 16,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 16,
+          "num_requests": 32,
+          "prompt_tokens": 64,
+          "max_tokens": 32
+        }
+      ]
+    }
+  ]
+}

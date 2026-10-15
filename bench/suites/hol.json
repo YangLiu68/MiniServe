@@ -1,0 +1,91 @@
+{
+  "name": "hol",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "rounds": 2,
+  "port": 8100,
+  "description": "M2/M3 - head-of-line blocking. decode-hol: a 'batch' tenant keeps 3 long generations (64->192 tokens) in flight while a 'chat' tenant sends short requests (32->16) as a Poisson process (0.3 req/s); compares one-at-a-time FIFO with continuous batching. prefill-hol: a 'docs' tenant sends 1500-token prompts while a 'chat' tenant streams 96-token answers; compares chunked prefill (256-token step budget) with unchunked prefill (whole prompt in one step).",
+  "configs": [
+    {
+      "name": "fifo-sequential",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "1",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "2048"
+      }
+    },
+    {
+      "name": "continuous-chunked",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "256"
+      }
+    },
+    {
+      "name": "continuous-unchunked",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "2048",
+        "MINISERVE_ENABLE_CHUNKED_PREFILL": "false"
+      }
+    }
+  ],
+  "base_env": {
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_MAX_WAITING_PER_TENANT": "1024",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4",
+    "MINISERVE_BACKEND": "native",
+    "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+  },
+  "scenarios": [
+    {
+      "name": "decode-hol",
+      "seed": 1,
+      "streams": [
+        {
+          "tenant": "batch",
+          "mode": "closed",
+          "concurrency": 3,
+          "duration_s": 60,
+          "prompt_tokens": 64,
+          "max_tokens": 192
+        },
+        {
+          "tenant": "chat",
+          "mode": "poisson",
+          "rate": 0.3,
+          "duration_s": 60,
+          "prompt_tokens": 32,
+          "max_tokens": 16,
+          "warmup_s": 5
+        }
+      ]
+    },
+    {
+      "name": "prefill-hol",
+      "seed": 2,
+      "streams": [
+        {
+          "tenant": "docs",
+          "mode": "closed",
+          "concurrency": 2,
+          "duration_s": 45,
+          "prompt_tokens": 1500,
+          "max_tokens": 4
+        },
+        {
+          "tenant": "chat",
+          "mode": "closed",
+          "concurrency": 2,
+          "duration_s": 45,
+          "prompt_tokens": 32,
+          "max_tokens": 96,
+          "warmup_s": 5
+        }
+      ]
+    }
+  ]
+}

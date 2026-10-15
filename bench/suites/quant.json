@@ -1,0 +1,67 @@
+{
+  "name": "quant",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "rounds": 2,
+  "port": 8100,
+  "description": "M5 - weight-only int8 (W8A16) vs fp16 on the native engine, MPS. Quality is measured separately (bench/eval_quant.py).",
+  "configs": [
+    {
+      "name": "fp16",
+      "env": {
+        "MINISERVE_QUANTIZATION": "none"
+      }
+    },
+    {
+      "name": "fp16+w8",
+      "env": {
+        "MINISERVE_QUANTIZATION": "int8"
+      }
+    }
+  ],
+  "base_env": {
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_MAX_WAITING_PER_TENANT": "1024",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4",
+    "MINISERVE_BACKEND": "native",
+    "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+  },
+  "scenarios": [
+    {
+      "name": "quant-c1",
+      "group": "quant",
+      "x": 1,
+      "seed": 1,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 4,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    },
+    {
+      "name": "quant-c16",
+      "group": "quant",
+      "x": 16,
+      "seed": 16,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 16,
+          "num_requests": 32,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    }
+  ]
+}

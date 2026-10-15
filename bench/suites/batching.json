@@ -1,0 +1,91 @@
+{
+  "name": "batching",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "rounds": 2,
+  "port": 8100,
+  "description": "M3 - throughput vs latency at matched model/device/dtype (SmolLM2-135M, MPS fp16). Sequential = one request at a time (the M1 design); continuous = iteration-level batching (max 32 sequences, 512-token step budget). Prefix caching off everywhere to isolate batching. Closed-loop clients, prompt 128 tokens, 64 output tokens (ignore_eos).",
+  "configs": [
+    {
+      "name": "hf-sequential",
+      "env": {
+        "MINISERVE_BACKEND": "hf",
+        "MINISERVE_MAX_NUM_SEQS": "1"
+      }
+    },
+    {
+      "name": "native-sequential",
+      "env": {
+        "MINISERVE_BACKEND": "native",
+        "MINISERVE_MAX_NUM_SEQS": "1"
+      }
+    },
+    {
+      "name": "native-continuous",
+      "env": {
+        "MINISERVE_BACKEND": "native",
+        "MINISERVE_MAX_NUM_SEQS": "32"
+      }
+    }
+  ],
+  "base_env": {
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_MAX_WAITING_PER_TENANT": "1024",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4",
+    "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+  },
+  "scenarios": [
+    {
+      "name": "batching-c1",
+      "group": "batching",
+      "x": 1,
+      "seed": 1,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 4,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    },
+    {
+      "name": "batching-c4",
+      "group": "batching",
+      "x": 4,
+      "seed": 4,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 4,
+          "num_requests": 8,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    },
+    {
+      "name": "batching-c16",
+      "group": "batching",
+      "x": 16,
+      "seed": 16,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 16,
+          "num_requests": 32,
+          "prompt_tokens": 128,
+          "max_tokens": 64
+        }
+      ]
+    }
+  ]
+}
