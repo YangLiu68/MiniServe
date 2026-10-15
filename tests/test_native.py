@@ -251,3 +251,19 @@ def test_int8_probe_detects_fused_kernel_and_odd_shapes_fall_back():
         ref = x @ w.T
         assert torch.isfinite(y).all()
         assert float((y.float().cpu() - ref).abs().max() / ref.abs().max()) < 0.02
+
+
+def test_single_sequence_decode_without_mask_equals_explicit_mask(tiny):
+    """The mask-free fast path for one-query single-sequence steps must not change logits."""
+    backend, _ = tiny
+    bm = BlockManager(backend.num_kv_blocks, backend.block_size, False)
+    ids = prompt(21, 4)
+    s = new_seq(bm, ids, "nomask")
+    native_logits(backend, [(s, 0, 20)])
+    batch = [ScheduledSeq(s, 20, 1)]
+    rows = []
+    for implicit in (True, False):
+        meta = build_metadata(batch, backend.block_size, backend.device, implicit_mask=implicit)
+        assert (meta.attn_mask is None) == implicit
+        rows.append(backend.model.forward(meta, backend.kv).float())
+    torch.testing.assert_close(rows[0], rows[1], atol=0, rtol=0)

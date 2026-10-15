@@ -162,7 +162,11 @@ class StepMetadata:
     positions: torch.Tensor  # [T]
     slot_mapping: torch.Tensor  # [T]   cache slot each new token's K/V is written to
     gather_slots: torch.Tensor  # [B, L] cache slots to read for each sequence (0 = padding)
-    attn_mask: torch.Tensor  # [B, 1, Q, L] bool, True = may attend
+    # [B, 1, Q, L] bool, True = may attend. None for a single-sequence decode (one query, every
+    # key valid): measured 17-21% faster per step on MPS than an all-True mask, same logits
+    # (results/profile/ab-implicit-mask.json). SDPA's is_causal for single-sequence prefill was
+    # mixed (-16% at 256 tokens, +6% at 1,024), so prefill keeps the explicit mask.
+    attn_mask: torch.Tensor | None
     q_index: torch.Tensor  # [T]   flat row in the padded [B*Q] query layout
     sample_index: torch.Tensor  # [S]   rows of T whose hidden state produces logits
     batch: int
@@ -171,7 +175,9 @@ class StepMetadata:
     uniform: bool = False  # every entry has max_q query tokens: no query padding needed
 
 
-def build_metadata(batch: list[ScheduledSeq], block_size: int, device: str) -> StepMetadata:
+def build_metadata(
+    batch: list[ScheduledSeq], block_size: int, device: str, implicit_mask: bool = True
+) -> StepMetadata:
     B = len(batch)
     q_lens = [s.num_query for s in batch]
     starts = [s.start for s in batch]
@@ -216,12 +222,14 @@ def build_metadata(batch: list[ScheduledSeq], block_size: int, device: str) -> S
     def dev(t: torch.Tensor) -> torch.Tensor:
         return t.to(device, non_blocking=True)
 
+    implicit = implicit_mask and B == 1 and Q == 1
+
     return StepMetadata(
         input_ids=dev(torch.tensor(ids, dtype=torch.long)),
         positions=dev(pos_t),
         slot_mapping=dev(slot_mapping),
         gather_slots=dev(gather),
-        attn_mask=dev(mask[:, None]),
+        attn_mask=None if implicit else dev(mask[:, None]),
         q_index=dev(torch.tensor(q_index, dtype=torch.long)),
         sample_index=dev(torch.tensor(sample_index, dtype=torch.long)),
         batch=B,

@@ -1,0 +1,26 @@
+{
+ "decode ctx=300": {
+  "explicit_ms": 43.79,
+  "implicit_ms": 37.71,
+  "paired_speedup": 1.171,
+  "max_logit_diff": 0.0
+ },
+ "decode ctx=1000": {
+  "explicit_ms": 44.64,
+  "implicit_ms": 38.51,
+  "paired_speedup": 1.208,
+  "max_logit_diff": 0.0
+ },
+ "prefill 256": {
+  "explicit_ms": 63.94,
+  "implicit_ms": 74.84,
+  "paired_speedup": 0.839,
+  "max_logit_diff": 0.0
+ },
+ "prefill 1024": {
+  "explicit_ms": 364.15,
+  "implicit_ms": 343.97,
+  "paired_speedup": 1.059,
+  "max_logit_diff": 0.0
+ }
+}
