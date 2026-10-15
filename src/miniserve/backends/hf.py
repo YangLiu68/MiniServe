@@ -86,6 +86,7 @@ def _kv_bytes_per_token(config, dtype: torch.dtype) -> int:
 class HFBackend:
     name = "hf"
     supports_prefix_caching = False
+    supports_speculation = False
 
     def __init__(
         self,

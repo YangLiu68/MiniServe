@@ -46,6 +46,8 @@ class MetricsSampler:
         "miniserve_batch_sequences_count",
         "miniserve_batch_tokens_sum",
         "miniserve_step_duration_seconds_sum",
+        "miniserve_spec_draft_tokens_total",
+        "miniserve_spec_accepted_tokens_total",
     )
 
     def __init__(self, client: httpx.AsyncClient, interval: float = 0.5) -> None:
@@ -98,6 +100,8 @@ class MetricsSampler:
         final = await self._scrape() or self.last
         delta = {c: final.get(c, 0.0) - self.first.get(c, 0.0) for c in self.COUNTERS}
         steps = delta["miniserve_batch_sequences_count"]
+        drafted = delta["miniserve_spec_draft_tokens_total"]
+        accepted = delta["miniserve_spec_accepted_tokens_total"]
         return {
             "peak_rss_mb": round(self.peaks.get(self.GAUGES[0], 0) / 2**20, 1),
             "peak_kv_usage": round(self.peaks.get(self.GAUGES[1], 0), 4),
@@ -116,6 +120,9 @@ class MetricsSampler:
             "mean_step_ms": round(1000 * delta["miniserve_step_duration_seconds_sum"] / steps, 2)
             if steps
             else None,
+            "spec_draft_tokens": drafted,
+            "spec_accepted_tokens": accepted,
+            "spec_acceptance": round(accepted / drafted, 4) if drafted else None,
             "series": self.series,
         }
 

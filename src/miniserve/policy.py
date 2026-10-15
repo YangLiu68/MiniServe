@@ -4,8 +4,10 @@
 * ``fair`` — Virtual Token Counter (Sheng et al., "Fairness in Serving Large Language Models",
   OSDI 2024): each tenant has a counter of weighted tokens it has been served; the next request
   comes from the backlogged tenant with the smallest counter. When a tenant becomes backlogged
-  its counter is lifted to the minimum of the currently backlogged tenants, so idle time cannot
-  be banked as credit. Input tokens weigh 1, output tokens 2 (the paper's default weights).
+  its counter is lifted to the minimum of the currently backlogged tenants — or, if nobody is
+  waiting, to the counter of the tenant whose request last left the queue (it is the one being
+  served) — so idle time cannot be banked as credit. Input tokens weigh 1, output tokens 2 (the
+  paper's default weights).
 
 Preempted sequences go back to the *front* of their queue (they were admitted before anything
 still waiting).
@@ -54,35 +56,59 @@ class FCFSPolicy:
 
 class FairPolicy:
     name = "fair"
+    # Idle tenants' counters are forgotten beyond this many; only counters at or below the
+    # lift floor are dropped, which a returning tenant would be lifted to anyway.
+    max_idle_tenants = 10_000
 
     def __init__(self, input_weight: float = 1.0, output_weight: float = 2.0) -> None:
         self.w_in, self.w_out = input_weight, output_weight
-        self._queues: dict[str, deque[Sequence]] = {}
+        self._queues: dict[str, deque[Sequence]] = {}  # backlogged tenants only
+        self._len = 0
+        self._last_left: str | None = None  # tenant whose request was admitted most recently
         self.counters: dict[str, float] = {}
+
+    def _floor(self) -> float:
+        if self._queues:
+            return min(self.counters[t] for t in self._queues)
+        if self._last_left is not None:
+            return self.counters.get(self._last_left, 0.0)
+        return 0.0
 
     def push(self, seq: Sequence, front: bool = False) -> None:
         q = self._queues.get(seq.tenant)
-        if not q:  # tenant becomes backlogged: lift its counter (no banking of idle credit)
-            backlogged = [self.counters[t] for t, tq in self._queues.items() if tq]
-            floor = min(backlogged) if backlogged else 0.0
+        if q is None:  # tenant becomes backlogged: lift its counter (no banking of idle credit)
+            floor = self._floor()
             self.counters[seq.tenant] = max(self.counters.get(seq.tenant, 0.0), floor)
-            q = self._queues.setdefault(seq.tenant, deque())
+            q = self._queues[seq.tenant] = deque()
+            if len(self.counters) > self.max_idle_tenants + len(self._queues):
+                self._forget_idle(floor)
         (q.appendleft if front else q.append)(seq)
+        self._len += 1
+
+    def _forget_idle(self, floor: float) -> None:
+        for tenant in [t for t, c in self.counters.items() if c <= floor]:
+            if tenant not in self._queues and tenant != self._last_left:
+                del self.counters[tenant]
 
     def peek(self) -> Sequence | None:
         best = None
         for tenant, q in self._queues.items():
-            if not q:
-                continue
             key = (self.counters[tenant], q[0].arrival)
             if best is None or key < best[0]:
                 best = (key, q[0])
         return best[1] if best else None
 
+    def _dequeued(self, seq: Sequence, q: deque[Sequence]) -> None:
+        self._len -= 1
+        if not q:
+            del self._queues[seq.tenant]
+
     def pop(self, seq: Sequence) -> None:
         q = self._queues[seq.tenant]
         assert q[0] is seq
         q.popleft()
+        self._last_left = seq.tenant
+        self._dequeued(seq, q)
 
     def remove(self, seq: Sequence) -> bool:
         q = self._queues.get(seq.tenant)
@@ -90,15 +116,20 @@ class FairPolicy:
             return False
         try:
             q.remove(seq)
-            return True
         except ValueError:
             return False
+        self._dequeued(seq, q)
+        return True
 
     def charge(self, scheduled: list[ScheduledSeq]) -> None:
-        """Bill tenants for tokens processed this step (recompute after preemption is free)."""
+        """Bill tenants for tokens processed this step (recompute after preemption is free).
+
+        Speculative draft tokens are billed as output tokens whether or not they are accepted:
+        the tenant used that compute.
+        """
         for s in scheduled:
             seq = s.seq
-            end = s.start + s.num_tokens
+            end = s.start + s.num_query
             new_lo = max(s.start, seq.max_computed)
             if end <= new_lo:
                 continue
@@ -109,7 +140,7 @@ class FairPolicy:
             )
 
     def __len__(self) -> int:
-        return sum(len(q) for q in self._queues.values())
+        return self._len
 
     def __iter__(self) -> Iterator[Sequence]:
         return iter([s for q in self._queues.values() for s in q])

@@ -175,6 +175,36 @@ def test_fair_policy_does_not_bank_idle_credit():
     assert p.counters["newcomer"] == 500.0  # lifted to the backlogged minimum, not 0
 
 
+def test_fair_policy_lifts_newcomer_to_the_tenant_being_served():
+    """Regression: a tenant arriving into an *empty* queue started at 0 and then won every
+    admission against a tenant that had been served alone (banked idle credit)."""
+    p = FairPolicy()
+    sched = make(policy=p, max_num_seqs=1, max_num_batched_tokens=100)
+    for i in range(3):  # A is served alone; nobody waits while its requests run
+        sched.add(mkseq(20, max_tokens=4, tenant="A", arrival=i))
+        run_to_completion(sched)
+    assert p.counters["A"] > 0 and len(p) == 0
+    for i in range(6):  # now B shows up, then both keep requests queued
+        sched.add(mkseq(20, max_tokens=4, tenant="B", arrival=10 + i))
+        sched.add(mkseq(20, max_tokens=4, tenant="A", arrival=10.5 + i))
+    assert p.counters["B"] == p.counters["A"]  # lifted, not 0
+    finished, _ = run_to_completion(sched)
+    first_six = [s.tenant for s in finished[:6]]
+    assert first_six.count("A") >= 2, first_six  # interleaved, not BBBBBB
+
+
+def test_fair_policy_forgets_idle_tenants_and_stays_cheap():
+    p = FairPolicy()
+    p.max_idle_tenants = 100
+    for i in range(5000):  # one-off tenants: each arrives, is admitted, never returns
+        s = mkseq(1, tenant=f"t{i}", arrival=i)
+        p.push(s)
+        assert p.peek() is s
+        p.pop(s)
+    assert len(p) == 0 and not p._queues
+    assert len(p.counters) <= 101
+
+
 def test_fair_policy_bills_recompute_once():
     p = FairPolicy()
     sched = make(policy=p, max_num_batched_tokens=100)

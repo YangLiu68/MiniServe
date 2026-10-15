@@ -287,7 +287,7 @@ def test_multi_tenant_keys_and_per_tenant_rate_limit():
         bob = {"Authorization": "Bearer kb"}
         assert c.post("/v1/completions", json={"prompt": "a"}, headers=alice).status_code == 200
         assert c.post("/v1/completions", json={"prompt": "a"}, headers=alice).status_code == 429
-        # bob has his own bucket
+        # bob has a separate bucket
         assert c.post("/v1/completions", json={"prompt": "b"}, headers=bob).status_code == 200
         assert (
             c.post(
@@ -295,6 +295,54 @@ def test_multi_tenant_keys_and_per_tenant_rate_limit():
             ).status_code
             == 401
         )
+
+
+def test_openai_client_variants_n1_developer_role_and_text_parts(toy_client):
+    assert complete(toy_client, prompt="ab", n=1, max_tokens=2).status_code == 200
+    r = complete(toy_client, prompt="ab", n=2)
+    assert r.status_code == 422  # one choice per request; rejected, not silently ignored
+    r = toy_client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "developer", "content": "be brief"},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi "}, {"type": "text", "text": "there"}],
+                },
+            ],
+            "max_tokens": 200,
+        },
+    )
+    assert r.status_code == 200
+    # toy chat template echoes "role: content" lines; developer is mapped to system
+    assert (
+        r.json()["choices"][0]["message"]["content"]
+        == "system: be brief\nuser: hi there\nassistant: "
+    )
+    image = {"type": "image_url", "image_url": {"url": "http://x/y.png"}}
+    r = toy_client.post(
+        "/v1/chat/completions", json={"messages": [{"role": "user", "content": [image]}]}
+    )
+    assert r.status_code == 422
+
+
+def test_prefix_cache_scope_tenant_isolates_tenants():
+    system = "a long shared system prompt for everyone. " * 2  # several full blocks
+    for scope, bob_hit in (("global", True), ("tenant", False)):
+        with app_client(ToyBackend(), api_keys="alice:ka,bob:kb", prefix_cache_scope=scope) as c:
+
+            def cached(key, q):
+                r = c.post(
+                    "/v1/completions",
+                    json={"prompt": system + q, "max_tokens": 1},
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                return r.json()["usage"]["prompt_tokens_details"]["cached_tokens"]
+
+            assert cached("ka", "1") == 0
+            assert (cached("kb", "2") > 0) == bob_hit
+            assert cached("ka", "3") > 0  # always shared within a tenant
 
 
 def test_metrics_endpoint_reports_requests_and_engine_state(toy_client):

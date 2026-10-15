@@ -5,6 +5,10 @@ Tokenizer: UTF-8 bytes (ids 0..255) plus EOS = 256.
 than the prompt's byte length finishes with ``length``; otherwise with ``stop``. Sampling params
 are accepted and ignored.
 
+Speculative decoding is supported: the "model" knows its own next tokens, so draft
+verification is exact and cheap, which makes the toy backend a precise test bed for the engine's
+multi-token steps.
+
 Step cost is simulated with a sleep, so scheduling experiments get controlled, reproducible
 timings (this says nothing about real model performance)::
 
@@ -43,6 +47,7 @@ class ByteTokenizer:
 class ToyBackend:
     name = "toy"
     supports_prefix_caching = True
+    supports_speculation = True
 
     def __init__(
         self,
@@ -65,17 +70,28 @@ class ToyBackend:
         self.overhead_s = step_overhead_ms / 1000
 
     def execute(self, batch: list[ScheduledSeq]) -> list[int | None]:
-        decode = sum(1 for s in batch if s.num_tokens == 1 and s.start >= s.seq.num_prompt_tokens)
-        prefill = sum(s.num_tokens for s in batch) - decode
+        # draft tokens are billed like decode tokens
+        decode = sum(
+            s.num_query for s in batch if s.num_tokens == 1 and s.start >= s.seq.num_prompt_tokens
+        )
+        prefill = sum(s.num_query for s in batch) - decode
         cost = self.overhead_s + self.prefill_s * prefill + self.decode_s * decode
         if cost:
             time.sleep(cost)
-        return [self._next(s.seq) if s.sample else None for s in batch]
+        return [self._verify(s) if s.sample else None for s in batch]
 
     @staticmethod
-    def _next(seq: Sequence) -> int:
-        k = seq.num_output_tokens
+    def _output(seq: Sequence, k: int) -> int:
+        """The k-th output token of ``seq``: prompt byte k, then EOS."""
         return seq.token_ids[k] if k < seq.num_prompt_tokens else ByteTokenizer.EOS
+
+    def _verify(self, s: ScheduledSeq) -> int:
+        g = s.seq.num_output_tokens
+        accepted = 0
+        while accepted < len(s.draft) and s.draft[accepted] == self._output(s.seq, g + accepted):
+            accepted += 1
+        s.accepted = accepted
+        return self._output(s.seq, g + accepted)
 
     def release(self, seq: Sequence, preempted: bool = False) -> None:
         pass

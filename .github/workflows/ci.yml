@@ -71,7 +71,7 @@ jobs:
         run: |
           docker run -d --name ms -p 8000:8000 -e MINISERVE_BACKEND=toy \
             -e MINISERVE_API_KEY=ci-key miniserve:ci
-          for i in $(seq 1 60); do curl -fs localhost:8000/readyz && break; sleep 1; done
+          for _ in $(seq 1 60); do curl -fs localhost:8000/readyz && break; sleep 1; done
           curl -fs localhost:8000/v1/completions -H 'Authorization: Bearer ci-key' \
             -H 'Content-Type: application/json' -d '{"prompt":"hello","max_tokens":5}'
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/completions \

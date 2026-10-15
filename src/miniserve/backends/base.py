@@ -5,6 +5,10 @@ The engine's scheduler decides which tokens of which sequences run in each step
 prompt, a prefill chunk, a recompute after preemption, or a single decode token). The backend
 runs that span against the sequence's KV cache and, for spans that reach the end of the
 sequence, samples the next token. Backends never decide *what* to run.
+
+A backend with ``supports_speculation`` also verifies draft tokens (``ScheduledSeq.draft``): it
+runs them in the same pass, sets ``ScheduledSeq.accepted`` to the number of leading draft
+tokens it confirms, and returns the token that follows them.
 """
 
 from __future__ import annotations
@@ -48,10 +52,12 @@ class Backend(Protocol):
     block_size: int
     num_kv_blocks: int
     supports_prefix_caching: bool
+    supports_speculation: bool
 
     def execute(self, batch: list[ScheduledSeq]) -> list[int | None]:
         """Run one step; return the sampled token for each entry whose span reaches the end of
-        its sequence (``ScheduledSeq.sample``), else ``None``."""
+        its sequence (``ScheduledSeq.sample``), else ``None``. For entries with a draft, the
+        returned token follows the ``accepted`` draft tokens."""
         ...
 
     def release(self, seq: Sequence, preempted: bool = False) -> None:

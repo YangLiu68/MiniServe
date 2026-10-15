@@ -1,0 +1,31 @@
+{
+ "_about": "Original prompts written for MiniServe's speculative-decoding benchmark (no third-party text). 'copy': tasks whose answer largely copies the input (edit, reformat, quote, refactor) - where n-gram drafts should pay off. 'open': free-form questions - where they should not.",
+ "copy": [
+  "Correct the spelling mistakes in this paragraph. Reply with the corrected paragraph only.\n\nThe libary opens at nine oclock every morning, exept on Sundays when it stays closed. Visitors can borow up to five books at a time and keep them for two weeks. If a book is returned late, a small fine is charged for each day. The reading room on the second floor is quite, and many students study there in the afternon. Computers are availible near the entrance, but they must be booked in advance at the front desk.",
+  "Add a docstring to this Python function and return the complete function.\n\n```python\ndef moving_average(values, window):\n    if window <= 0:\n        raise ValueError(\"window must be positive\")\n    result = []\n    total = 0.0\n    for i, value in enumerate(values):\n        total += value\n        if i >= window:\n            total -= values[i - window]\n        if i >= window - 1:\n            result.append(total / window)\n    return result\n```",
+  "Rename the variable `tmp` to `buffer` everywhere in this code and return the full code.\n\n```python\ndef read_chunks(path, size):\n    tmp = []\n    with open(path, \"rb\") as f:\n        while True:\n            data = f.read(size)\n            if not data:\n                break\n            tmp.append(data)\n    return b\"\".join(tmp)\n```",
+  "Turn this shopping list into a numbered list, keeping every item exactly as written.\n\n- two loaves of whole wheat bread\n- a dozen free range eggs\n- one bag of green apples\n- a carton of oat milk\n- three cans of chopped tomatoes\n- a block of cheddar cheese\n- fresh basil and parsley\n- a jar of honey",
+  "Read the text and answer the question by copying the sentence that contains the answer.\n\nText: The old lighthouse stands on a rocky island two miles from the harbor. It was built in 1871 and was operated by a keeper until 1958, when the light was automated. Today the tower is open to visitors during the summer months. A small museum next to the tower displays the original lens and the keeper's logbooks.\n\nQuestion: When was the light automated?",
+  "Rewrite this email so it sounds more polite. Keep all the details.\n\nHi Sam, the meeting moved to Thursday at 3 pm in room 204. Bring the budget report and the slides from last week. We need the final numbers by Friday noon. Tell Alex to join too.",
+  "Convert the following facts into a JSON object with the keys name, city, year and field.\n\nName: Maria Lopez\nCity: Valencia\nYear: 2019\nField: marine biology",
+  "List every city mentioned in the text below, one per line, in the order they appear.\n\nOur tour started in Lisbon and moved north to Porto. After two days we took a train to Madrid, then flew to Paris for the weekend. From Paris we went to Brussels and Amsterdam before ending the trip in Berlin.",
+  "Add a WHERE clause to this SQL query so it only returns rows where status is 'active'. Return the full query.\n\nSELECT id, name, email, created_at\nFROM customers\nORDER BY created_at DESC\nLIMIT 50;",
+  "Copy the following paragraph exactly, then add one sentence at the end.\n\nGood programs are written for two audiences: the computer, which needs precise instructions, and the people who will read and change the code later. Clear names, small functions and honest comments make the second audience's job much easier.",
+  "Change this JavaScript function to use const instead of let where possible, and return the whole function.\n\nfunction totalPrice(items) {\n  let sum = 0;\n  for (let i = 0; i < items.length; i++) {\n    let item = items[i];\n    let price = item.price * item.quantity;\n    sum += price;\n  }\n  return sum;\n}",
+  "Rewrite this list as a Markdown table with columns Planet and Moons.\n\nMercury has 0 moons. Venus has 0 moons. Earth has 1 moon. Mars has 2 moons. Jupiter has 95 moons. Saturn has 146 moons."
+ ],
+ "open": [
+  "Write a short story about a robot who learns to paint.",
+  "Explain why the sky is blue in simple terms.",
+  "Give me three ideas for a weekend trip with friends.",
+  "What are the benefits of regular exercise?",
+  "Describe a relaxing morning routine.",
+  "Write a poem about the ocean at night.",
+  "How does a refrigerator keep food cold?",
+  "Suggest a name for a coffee shop and explain why.",
+  "What should I consider when adopting a dog?",
+  "Explain the difference between weather and climate.",
+  "Write a friendly message inviting a neighbor to dinner.",
+  "Why do leaves change color in the autumn?"
+ ]
+}

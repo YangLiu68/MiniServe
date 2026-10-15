@@ -46,9 +46,13 @@ No copyleft (GPL/AGPL) dependencies.
 | Chunked prefill, decode-first ("stall-free") batching | Agrawal et al., *Sarathi-Serve*, OSDI 2024 | `scheduler.py` |
 | Virtual Token Counter fair scheduling | Sheng et al., *Fairness in Serving LLMs*, OSDI 2024 | `policy.py` |
 | Windowed incremental detokenization | Hugging Face TGI / vLLM (Apache-2.0) | `detokenizer.py` |
+| Speculative decoding and its distribution-preserving acceptance rule | Leviathan et al., *Fast Inference from Transformers via Speculative Decoding*, ICML 2023; Chen et al., *Accelerating LLM Decoding with Speculative Sampling*, 2023 | `sampling.py`, `scheduler.py`, `backends/native.py` |
+| N-gram / prompt-lookup drafts | Saxena, *Prompt Lookup Decoding* (2023); vLLM's `ngram` speculative method | `speculative.py` |
+| Per-tenant prefix-cache isolation | vLLM's `cache_salt` | `sequence.py`, `engine.py` |
 | Weight-only int8 with per-channel scales | common practice (e.g. gpt-fast, torchao) using PyTorch's `_weight_int8pack_mm` | `backends/native.py` |
 
-The benchmark evaluation text (`bench/data/eval_text.txt`) was written for this repository.
+The benchmark texts (`bench/data/eval_text.txt`, `bench/data/spec_prompts.json`) were written for
+this repository.
 
 ## External tools (optional, not dependencies)
 

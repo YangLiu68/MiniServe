@@ -116,7 +116,7 @@ class BlockManager:
             self._ref[b] += 1
         seq.block_ids = list(hit.blocks)
         self._num_hashed[seq.request_id] = len(hit.blocks)
-        if self.enable_prefix_caching:
+        if self.enable_prefix_caching and seq.num_preemptions == 0:  # recompute is not a query
             self.stats.queried_tokens += seq.num_tokens
             self.stats.hit_tokens += hit.num_tokens
         self.allocate(seq, num_tokens)

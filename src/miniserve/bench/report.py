@@ -65,6 +65,8 @@ def aggregate(runs: list[dict[str, Any]], scope: str = "all") -> dict[tuple[str,
         "server.mean_step_ms",
         "server.preemptions",
         "server.peak_waiting",
+        "server.spec_acceptance",
+        "server.spec_accepted_tokens",
     ]
     out = {}
     for key, rs in groups.items():
@@ -116,12 +118,16 @@ SERVER_COLUMNS = [
     ("peak RSS MB", "server.peak_rss_mb"),
     ("preempt", "server.preemptions"),
     ("cached", "summary.S.prefix_cached_fraction"),
+    ("draft accept", "server.spec_acceptance"),
 ]
 
 
 def table(agg: dict, scenario: str, configs: list[str], with_server: bool = True) -> str:
     cols = COLUMNS + (SERVER_COLUMNS if with_server else [])
-    lines = ["| config | " + " | ".join(c for c, _ in cols) + " |", "|---|" + "---:|" * len(cols)]
+    rows = [agg[(scenario, c)] for c in configs if (scenario, c) in agg]
+    if not any(r.get("server.spec_acceptance", (None,))[0] is not None for r in rows):
+        cols = [c for c in cols if c[0] != "draft accept"]  # only when speculation was used
+    lines =["| config | " + " | ".join(c for c, _ in cols) + " |", "|---|" + "---:|" * len(cols)]
     for cfg in configs:
         a = agg.get((scenario, cfg))
         if a is None:
@@ -133,7 +139,7 @@ def table(agg: dict, scenario: str, configs: list[str], with_server: bool = True
                 cells.append(f"{_fmt(ok, 0)}/{_fmt(err, 0)}")
             elif name in ("out tok/s", "TTFT p50", "TTFT p95"):
                 cells.append(_spread(a[path]))
-            elif name in ("peak KV", "cached"):
+            elif name in ("peak KV", "cached", "draft accept"):
                 v = a[path][0]
                 cells.append("–" if v is None else f"{v:.0%}")
             else:

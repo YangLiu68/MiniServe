@@ -11,7 +11,7 @@ flowchart LR
         H -->|"TokenEvent / FinishEvent"| R["JSON or SSE response<br/>/v1/completions · /v1/chat/completions"]
     end
     subgraph worker["engine worker thread"]
-        I[(inbox)] --> S["Scheduler<br/>policy: FCFS | fair (VTC)<br/>decode-first · chunked prefill<br/>recompute preemption"]
+        I[(inbox)] --> S["Scheduler<br/>policy: FCFS | fair (VTC)<br/>decode-first · chunked prefill<br/>recompute preemption<br/>n-gram draft proposals"]
         S <--> BM["BlockManager<br/>block tables · ref counts<br/>prefix hash → block · LRU"]
         S -->|"ScheduledSeq[]"| B["Backend.execute(batch)"]
         B --> D["detokenize · stop strings<br/>EOS / max_tokens"]
@@ -40,7 +40,8 @@ flowchart LR
 3. **Scheduling (every step).** See below. Admitted sequences get KV blocks (reusing cached
    prefix blocks), a "started" notification is posted *before* the step runs.
 4. **Execution.** `backend.execute(batch)` runs one forward pass over all scheduled spans and
-   samples a token for each span that reaches the end of its sequence.
+   samples a token for each span that reaches the end of its sequence (with speculative
+   decoding: verifies the span's draft tokens and samples the token after the accepted ones).
 5. **Post-processing.** Discard tokens of sequences cancelled/expired during the step; check EOS
    (unless `ignore_eos`), incremental detokenization, stop strings, `max_tokens`. Events for the
    whole step go back to the loop in one `call_soon_threadsafe`.
@@ -71,9 +72,47 @@ flowchart TD
   retracted; its sampler keeps its RNG stream so seeded output is unchanged; with prefix caching
   most of the recompute is a cache hit.
 * **Fair policy (VTC).** Each tenant has a counter of weighted tokens served (input ×1,
-  output ×2, recompute not billed); the next admission comes from the backlogged tenant with
-  the smallest counter. A tenant returning from idle is lifted to the current minimum so idle
-  time cannot be banked.
+  output ×2, recompute not billed, speculative drafts billed as compute); the next admission
+  comes from the backlogged tenant with the smallest counter. A tenant returning from idle is
+  lifted to the backlogged minimum — or, when nobody waits, to the counter of the tenant admitted
+  last (the one being served) — so idle time cannot be banked. Tenants with empty queues drop
+  out of the per-step scan.
+
+## Speculative decoding (n-gram drafts)
+
+At small batch sizes a decode step is dominated by fixed costs (~1,000 kernel launches, reading
+all weights), so running a few *extra* query tokens through the same pass is nearly free.
+`MINISERVE_SPECULATIVE=ngram` uses that:
+
+```
+committed: ... the cat sat on the mat . the cat      last token "cat" at position p
+draft    : n-gram lookup — "the cat" occurred before, followed by "sat on the mat"
+step     : run [cat, sat, on, the, mat] at positions p..p+4 in ONE forward pass
+verify   : model's argmax at each position:  sat ✓  on ✓  the ✓  floor ✗
+emit     : sat on the floor   (3 accepted + 1 corrected = 4 tokens from 1 step)
+```
+
+* **Drafts** come from prompt-lookup / n-gram matching against the sequence's own prompt and
+  output (`speculative.py`): an incrementally maintained index from each n-gram (n = 3, then 2)
+  to its most recent earlier continuation — O(new tokens) per step, no draft model, no extra
+  memory on the GPU.
+* **Scheduling.** Only while ≤ `SPEC_MAX_BATCH` sequences are decoding (above that a step is
+  compute-bound enough that verification is no longer free). Drafts take token budget and KV
+  slots like normal tokens but never cause a preemption — a draft that doesn't fit is shortened
+  — and never run past `max_tokens`.
+* **Verification** (`sampling.verify_draft`). The draft tokens are extra query rows of the
+  sequence's span (causal mask as for a prefill chunk) and every row yields logits. Greedy:
+  accept while draft == argmax. Sampling: accept draft token d with probability p(d) and on
+  rejection sample from p with d removed — the standard speculative-sampling rule for a
+  deterministic draft, which leaves the output distribution exactly unchanged (tested
+  statistically). Either way one extra token is emitted, so every step yields ≥ 1 token.
+* **KV bookkeeping.** Rejected drafts' K/V lie beyond `num_computed`: they are masked and
+  overwritten by the next step, so there is nothing to roll back. Accepted drafts' K/V are
+  already correct (they were computed from the true prefix) and count as computed. Only fully
+  committed blocks are ever hashed into the prefix cache.
+* **Engine.** A step can now emit several tokens per sequence; stop conditions are checked after
+  each one, so a stop string, EOS or `max_tokens` inside an accepted draft ends the request
+  exactly where plain decoding would have (tested on the toy backend against plain decoding).
 
 ## Paged KV cache and prefix caching (original implementation)
 
@@ -98,6 +137,10 @@ seq B block table:  [b0, b1, b4]      (b0, b1 shared: same system prompt, ref co
   last.
 * Shared blocks are full and immutable — sequences only append into their private last block —
   so no copy-on-write is required.
+* `MINISERVE_PREFIX_CACHE_SCOPE=tenant` seeds each tenant's hash chain with a salt, so blocks are
+  never shared across tenants: otherwise a tenant could learn from `cached_tokens` (or TTFT)
+  that someone else recently sent a given prompt (vLLM's `cache_salt` addresses the same leak).
+  Default `global` maximizes reuse.
 * Invariants (every block is exactly one of free / evictable / in use; ref counts equal live
   block-table references; hash map consistent) are asserted after every operation in a
   600-step randomized test and in every engine-level test.
@@ -144,7 +187,7 @@ claimed here.
 |---|---|
 | Streaming client disconnects | `_SSEResponse.__call__` cancels in `finally` (the body generator alone is not enough: if parked at a `yield` it is only closed by GC) |
 | Non-streaming client disconnects | watcher task awaits the next ASGI `receive()` (`http.disconnect`) |
-| `POST /v1/requests/{id}/cancel` | looks up the in-flight handle |
+| `POST /v1/requests/{id}/cancel` | looks up the in-flight handle; only its own tenant may cancel it (others get 404); works while draining |
 | Deadline (`timeout_s` ≤ `REQUEST_TIMEOUT_S`) | covers queue + generation; enforced by the worker (before/after each step) **and** by the consumer's `wait_for`, so the client gets its timeout on time even during a long step |
 | Shutdown (SIGTERM) | readiness fails and new requests get 503 (drain), uvicorn waits up to `DRAIN_TIMEOUT_S` for in-flight streams, then the engine cancels the rest |
 
@@ -166,8 +209,9 @@ Each request produces exactly one `FinishEvent` (later events are dropped by the
 
 ## Known limitations
 
-* Single process, single device; no tensor/pipeline parallelism, no multi-LoRA, no speculative
-  decoding, no logprobs, `n=1` only.
+* Single process, single device; no tensor/pipeline parallelism, no multi-LoRA, no logprobs,
+  `n=1` only. Speculative decoding uses n-gram drafts only (no draft model, EAGLE or Medusa
+  heads), so it helps when outputs copy from the context and does nothing for free-form text.
 * Attention is gather-based PyTorch, not a fused paged kernel (see above).
 * Batch invariance is not guaranteed: a sequence's logits can differ in the last bits depending
   on what it is batched with (different GEMM shapes). Seeded sampling is still per-request

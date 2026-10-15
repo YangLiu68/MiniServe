@@ -2,7 +2,9 @@
 
 Explains *why* continuous batching helps (or not) on a given device: if a decode step for 16
 sequences costs about the same as for 1, batching multiplies throughput. Measures the native
-paged backend and, for reference, the Transformers DynamicCache backend.
+paged backend and, for reference, the Transformers DynamicCache backend. ``--verify`` also times
+speculative verification steps (1 committed + q-1 draft tokens per sequence), the cost side of
+speculative decoding.
 
     python bench/profile_step.py --device mps --dtype float16 --out results/profile/mps-fp16.json
 """
@@ -67,6 +69,8 @@ def main() -> None:
     ap.add_argument("--prefill", default="64,256,1024")
     ap.add_argument("--iters", type=int, default=15)
     ap.add_argument("--hf-batches", default="1,4,16")
+    ap.add_argument("--verify", default="", help="query lengths, e.g. 1,3,5,9 (off by default)")
+    ap.add_argument("--verify-batches", default="1,4")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -84,6 +88,7 @@ def main() -> None:
         "decode": [],
         "prefill": [],
         "hf_decode": [],
+        "verify": [],
     }
 
     for b in [int(x) for x in args.batches.split(",")]:
@@ -97,6 +102,20 @@ def main() -> None:
         print(f"native decode  B={b:3d}: {ms:7.2f} ms/step  {b / ms * 1000:8.1f} tok/s")
         for s in seqs:
             native.release(s)
+
+    for b in [int(x) for x in args.verify_batches.split(",")] if args.verify else []:
+        for q in [int(x) for x in args.verify.split(",")]:
+            bm = BlockManager(native.num_kv_blocks, native.block_size, False)
+            seqs = make_seqs(native, bm, b, args.context)
+            for s in seqs:
+                bm.allocate(s, args.context + q)  # slots for the draft tokens
+            draft = tuple(range(100, 100 + q - 1))
+            batch = [ScheduledSeq(s, args.context, 1, draft) for s in seqs]
+            ms = timed(lambda batch=batch: native.execute(batch), args.device, args.iters)
+            result["verify"].append({"batch": b, "query": q, "step_ms": round(ms, 2)})
+            print(f"native verify  B={b:3d} q={q:2d}: {ms:7.2f} ms/step")
+            for s in seqs:
+                native.release(s)
 
     for n in [int(x) for x in args.prefill.split(",")]:
         bm = BlockManager(native.num_kv_blocks, native.block_size, False)

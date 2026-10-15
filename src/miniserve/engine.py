@@ -14,6 +14,11 @@ Threading model
   ``threading.Event`` (cancel flag), and ``loop.call_soon_threadsafe`` (one batch of events per
   step). No asyncio object is touched from the worker; no scheduler state from the loop.
 
+With speculative decoding a step can produce several tokens for one sequence (verified draft
+tokens + one sampled token); they are delivered in order and stop conditions are checked after
+each one, so a stop string, EOS or ``max_tokens`` inside an accepted draft ends the request
+exactly where non-speculative decoding would have.
+
 Cancellation and deadlines are checked before each step (a cancelled sequence is not scheduled)
 and again after it (a token computed after cancel/deadline is discarded, never delivered).
 """
@@ -37,6 +42,7 @@ from miniserve.detokenizer import IncrementalDetokenizer
 from miniserve.policy import make_policy
 from miniserve.scheduler import Scheduler, SchedulerConfig, SchedulerOutput
 from miniserve.sequence import SeqStatus, Sequence
+from miniserve.speculative import NgramProposer
 from miniserve.stop import StopChecker
 
 log = logging.getLogger(__name__)
@@ -71,6 +77,14 @@ class EngineConfig:
     max_waiting_per_tenant: int = 64
     max_queued_tokens: int = 1 << 20  # prompt tokens waiting (bounds queue memory)
     watermark: float = 0.01  # fraction of KV blocks kept free when admitting
+    speculative: str = "none"  # "ngram": prompt-lookup speculative decoding
+    num_speculative_tokens: int = 4
+    ngram_max: int = 3
+    ngram_min: int = 2
+    spec_max_batch: int = 4  # speculate only while at most this many sequences decode
+    # "tenant": prefix-cache blocks are only shared within a tenant (no cross-tenant timing or
+    # cached_tokens side channel about other tenants' prompts); "global": shared by everyone
+    prefix_cache_scope: str = "global"
 
 
 @dataclass
@@ -119,6 +133,8 @@ class FinishEvent:
     timings: dict[str, float | None] = field(default_factory=dict)
     cached_tokens: int = 0
     preemptions: int = 0
+    draft_tokens: int = 0  # speculative decoding: proposed ...
+    accepted_tokens: int = 0  # ... and accepted draft tokens
 
 
 Event = TokenEvent | FinishEvent
@@ -215,16 +231,28 @@ class Engine:
         self.metrics = metrics
         prefix = cfg.enable_prefix_caching and backend.supports_prefix_caching
         self.block_manager = BlockManager(backend.num_kv_blocks, backend.block_size, prefix)
+        self.proposer: NgramProposer | None = None
+        if cfg.speculative == "ngram":
+            if getattr(backend, "supports_speculation", False):
+                self.proposer = NgramProposer(
+                    cfg.num_speculative_tokens, cfg.ngram_max, cfg.ngram_min
+                )
+            else:
+                log.warning("backend %r cannot verify drafts; speculation disabled", backend.name)
+        elif cfg.speculative != "none":
+            raise ValueError(f"unknown speculative method {cfg.speculative!r}")
         self.scheduler = Scheduler(
             SchedulerConfig(
                 max_num_seqs=cfg.max_num_seqs,
                 max_num_batched_tokens=cfg.max_num_batched_tokens,
                 enable_chunked_prefill=cfg.enable_chunked_prefill,
                 watermark_blocks=int(cfg.watermark * backend.num_kv_blocks),
+                spec_max_batch=cfg.spec_max_batch,
             ),
             self.block_manager,
             make_policy(cfg.policy),
             on_release=backend.release,
+            proposer=self.proposer,
         )
         # worker side
         self._inbox: list[Sequence] = []
@@ -233,6 +261,9 @@ class Engine:
         self._thread: threading.Thread | None = None
         self._stopping = False
         self.num_steps = 0
+        self.spec_steps = 0  # steps that verified at least one draft token
+        self.spec_draft_tokens = 0
+        self.spec_accepted_tokens = 0
         self.fatal_error: str | None = None
         # loop side
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -311,6 +342,7 @@ class Engine:
             handle.timings.arrival,
             handle.deadline,
             handle=handle,
+            cache_salt=tenant.encode() if cfg.prefix_cache_scope == "tenant" else b"",
         )
         self._active[handle.id] = handle
         self._queued.add(handle.id)
@@ -320,6 +352,20 @@ class Engine:
             self._inbox.append(seq)
         self._wake_event.set()
         return handle
+
+    def speculation_stats(self) -> dict[str, Any] | None:
+        if self.proposer is None:
+            return None
+        drafted, accepted = self.spec_draft_tokens, self.spec_accepted_tokens
+        return {
+            "method": self.proposer.method,
+            "num_speculative_tokens": self.proposer.num_tokens,
+            "max_batch": self.config.spec_max_batch,
+            "steps": self.spec_steps,
+            "draft_tokens": drafted,
+            "accepted_tokens": accepted,
+            "acceptance_rate": round(accepted / drafted, 4) if drafted else None,
+        }
 
     def get(self, request_id: str) -> RequestHandle | None:
         return self._active.get(request_id)
@@ -356,6 +402,8 @@ class Engine:
                 "completion_tokens": f.completion_tokens,
                 "cached_tokens": f.cached_tokens,
                 "preemptions": f.preemptions,
+                **({"draft_tokens": f.draft_tokens} if f.draft_tokens else {}),
+                **({"accepted_tokens": f.accepted_tokens} if f.draft_tokens else {}),
                 **{k: v for k, v in f.timings.items()},
                 **({"error": f.error} if f.error else {}),
             },
@@ -413,7 +461,7 @@ class Engine:
             new, self._inbox = self._inbox, []
         tokenizer = self.backend.tokenizer
         for seq in new:
-            seq.detok = IncrementalDetokenizer(tokenizer)
+            seq.detok = IncrementalDetokenizer(tokenizer, seq.prompt_ids)
             seq.stopper = StopChecker(seq.params.stop) if seq.params.stop else None
             self.scheduler.add(seq)
 
@@ -457,32 +505,48 @@ class Engine:
             return
         step_s = time.perf_counter() - t0
         self.num_steps += 1
+        if out.num_draft_tokens:
+            self.spec_steps += 1
+            self.spec_draft_tokens += out.num_draft_tokens
+            self.spec_accepted_tokens += sum(s.accepted for s in out.scheduled)
         self.scheduler.complete_step(out)
         now = time.monotonic()
-        eos = self.backend.tokenizer.eos_token_ids
         for s, tok in zip(out.scheduled, tokens, strict=True):
             seq = s.seq
             if tok is None or seq.status == SeqStatus.FINISHED:
                 continue
+            seq.num_draft_tokens += len(s.draft)
+            seq.num_accepted_tokens += s.accepted
             reason = self._interrupted(seq, now)
-            if reason is not None:  # computed after cancel/deadline: discard the token
+            if reason is not None:  # computed after cancel/deadline: discard the token(s)
                 self._finish(seq, reason, events)
                 continue
-            if tok in eos and not seq.params.ignore_eos:
-                self._finish(seq, FinishReason.STOP, events)
-                continue
-            seq.token_ids.append(tok)
-            text = seq.detok.add(tok)
-            stopped = False
-            if seq.stopper is not None:
-                text, stopped = seq.stopper.process(text)
-            events.append((seq.handle, TokenEvent(seq.num_output_tokens - 1, tok, text, now)))
-            if stopped:
-                self._finish(seq, FinishReason.STOP, events, flush=False)
-            elif seq.num_output_tokens >= seq.params.max_tokens:
-                self._finish(seq, FinishReason.LENGTH, events)
+            for t in (*s.draft[: s.accepted], tok):
+                if not self._append_token(seq, t, now, events):
+                    break
+            else:
+                self.scheduler.accept_draft(seq, s.accepted)
         if self.metrics is not None:
             self.metrics.observe_step(self, out, step_s)
+
+    def _append_token(self, seq: Sequence, tok: int, now: float, events) -> bool:
+        """Append one generated token and emit it; False if the sequence finished."""
+        if tok in self.backend.tokenizer.eos_token_ids and not seq.params.ignore_eos:
+            self._finish(seq, FinishReason.STOP, events)
+            return False
+        seq.token_ids.append(tok)
+        text = seq.detok.add(tok)
+        stopped = False
+        if seq.stopper is not None:
+            text, stopped = seq.stopper.process(text)
+        events.append((seq.handle, TokenEvent(seq.num_output_tokens - 1, tok, text, now)))
+        if stopped:
+            self._finish(seq, FinishReason.STOP, events, flush=False)
+            return False
+        if seq.num_output_tokens >= seq.params.max_tokens:
+            self._finish(seq, FinishReason.LENGTH, events)
+            return False
+        return True
 
     def _finish(
         self,
@@ -512,6 +576,8 @@ class Engine:
                     error=error,
                     cached_tokens=seq.num_cached_tokens,
                     preemptions=seq.num_preemptions,
+                    draft_tokens=seq.num_draft_tokens,
+                    accepted_tokens=seq.num_accepted_tokens,
                 ),
             )
         )

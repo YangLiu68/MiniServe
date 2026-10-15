@@ -16,6 +16,9 @@ the library's), but the forward pass, the KV cache and the batching are ours:
   PagedAttention kernel reads blocks in place instead of materialising the gather; that is the
   main performance gap to vLLM and is documented as such.
 * Fused QKV and gate/up projections (one GEMM each instead of three/two).
+* Speculative decoding: a decode entry may carry draft tokens; they run as extra query rows of
+  the same pass (positions after the last committed token, causal mask as for a prefill chunk)
+  and every one of those rows produces logits for verification.
 
 Correctness is pinned by tests against the Transformers implementation: logits for whole
 prompts, chunked prefill, mixed batches and prefix-cache hits match HF within float tolerance.
@@ -165,11 +168,12 @@ class StepMetadata:
     batch: int
     max_q: int
     max_ctx: int
+    uniform: bool = False  # every entry has max_q query tokens: no query padding needed
 
 
 def build_metadata(batch: list[ScheduledSeq], block_size: int, device: str) -> StepMetadata:
     B = len(batch)
-    q_lens = [s.num_tokens for s in batch]
+    q_lens = [s.num_query for s in batch]
     starts = [s.start for s in batch]
     Q = max(q_lens)
     ctx_lens = [st + q for st, q in zip(starts, q_lens, strict=True)]
@@ -183,14 +187,14 @@ def build_metadata(batch: list[ScheduledSeq], block_size: int, device: str) -> S
     sample_index: list[int] = []
     tables = torch.zeros(B, max_blocks, dtype=torch.long)
     for b, s in enumerate(batch):
-        n = s.num_tokens
+        n = s.num_query
         ids += s.token_ids
         pos += range(s.start, s.start + n)
         q_index += range(b * Q, b * Q + n)
         tok_seq += [b] * n
         tables[b, : len(s.seq.block_ids)] = torch.tensor(s.seq.block_ids, dtype=torch.long)
-        if s.sample:
-            sample_index.append(len(ids) - 1)
+        if s.sample:  # last row; with a draft, the last committed token and every draft row
+            sample_index += range(len(ids) - 1 - len(s.draft), len(ids))
 
     pos_t = torch.tensor(pos, dtype=torch.long)
     slot_mapping = (
@@ -223,6 +227,7 @@ def build_metadata(batch: list[ScheduledSeq], block_size: int, device: str) -> S
         batch=B,
         max_q=Q,
         max_ctx=L,
+        uniform=all(q == Q for q in q_lens),
     )
 
 
@@ -356,8 +361,8 @@ class NativeLlama:
     def attention(self, q, k_cache, v_cache, meta: StepMetadata) -> torch.Tensor:
         T, H, D = q.shape
         B, Q = meta.batch, meta.max_q
-        if Q == 1:  # pure decode step: one query per sequence, no padding needed
-            qp = q.view(B, 1, H, D)
+        if meta.uniform:  # e.g. pure decode, one sequence, equal drafts: no padding needed
+            qp = q.view(B, Q, H, D)
         else:
             qp = q.new_zeros(B * Q, H, D)
             qp[meta.q_index] = q
@@ -375,7 +380,7 @@ class NativeLlama:
                 kp, vp = kp.repeat_interleave(rep, dim=1), vp.repeat_interleave(rep, dim=1)
             o = F.scaled_dot_product_attention(qp, kp, vp, attn_mask=meta.attn_mask)
         o = o.transpose(1, 2).reshape(B * Q, H, D)
-        return o if Q == 1 else o[meta.q_index]
+        return o if meta.uniform else o[meta.q_index]
 
     @torch.inference_mode()
     def forward(self, meta: StepMetadata, kv: PagedKVCache) -> torch.Tensor:
@@ -407,6 +412,7 @@ class NativeLlama:
 class NativeBackend:
     name = "native"
     supports_prefix_caching = True
+    supports_speculation = True
 
     def __init__(
         self,
@@ -487,8 +493,16 @@ class NativeBackend:
     def execute(self, batch: list[ScheduledSeq]) -> list[int | None]:
         meta = build_metadata(batch, self.block_size, self.device)
         logits = self.model.forward(meta, self.kv)
-        sampling = [s.seq for s in batch if s.sample]
-        tokens = iter(self.sampler.sample(logits, sampling) if sampling else [])
+        sampling = [s for s in batch if s.sample]
+        if any(s.draft for s in sampling):
+            results = self.sampler.sample_with_drafts(logits, [(s.seq, s.draft) for s in sampling])
+            for s, (accepted, _) in zip(sampling, results, strict=True):
+                s.accepted = accepted
+            tokens = iter(tok for _, tok in results)
+        elif sampling:
+            tokens = iter(self.sampler.sample(logits, [s.seq for s in sampling]))
+        else:
+            tokens = iter(())
         return [next(tokens) if s.sample else None for s in batch]
 
     def release(self, seq: Sequence, preempted: bool = False) -> None:

@@ -110,6 +110,10 @@ function tiles(b, info) {
     ["cached blocks", cached], ["prefix hit rate", `${(100 * hit).toFixed(0)}%`],
     ["engine steps / s", sps.toFixed(1)], ["preemptions", b.preemptions],
   ];
+  const spec = b.speculative;
+  if (spec && spec.draft_tokens) {
+    items.push(["draft tokens accepted", `${(100 * spec.acceptance_rate).toFixed(0)}%`]);
+  }
   document.getElementById("tiles").innerHTML = items.map(([k, v]) =>
     `<div class="tile"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("");
   const counts = { free: 0, cached: 0, used: 0, shared: 0 };

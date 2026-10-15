@@ -89,6 +89,34 @@ def test_cancel_endpoint_ends_stream_with_cancelled():
         assert backend.produced < 60
 
 
+def test_cancel_is_scoped_to_the_owner_and_works_while_draining():
+    """Regressions: any tenant could cancel another tenant's request; cancel returned 503
+    while the server was draining."""
+    backend = ToyBackend(**SLOW)
+    with live_server(backend, api_keys="alice:ka,bob:kb") as (url, app):
+        alice, bob = {"Authorization": "Bearer ka"}, {"Authorization": "Bearer kb"}
+        with httpx.Client(base_url=url, timeout=10) as client:
+            body = {"prompt": "x" * 300, "max_tokens": 300, "stream": True}
+            with client.stream("POST", "/v1/completions", json=body, headers=alice) as r:
+                rid = r.headers["x-request-id"]
+                cancel = f"{url}/v1/requests/{rid}/cancel"
+                results = {}
+
+                def act():
+                    time.sleep(0.1)
+                    results["bob"] = httpx.post(cancel, headers=bob, timeout=5)
+                    app.state.miniserve.begin_drain()
+                    results["alice"] = httpx.post(cancel, headers=alice, timeout=5)
+
+                t = threading.Thread(target=act)
+                t.start()
+                lines = [ln for ln in r.iter_lines() if ln.startswith("data: ")]
+                t.join()
+    assert results["bob"].status_code == 404  # not "forbidden": ids are not disclosed
+    assert results["alice"].status_code == 200
+    assert '"finish_reason": "cancelled"' in lines[-2]
+
+
 def test_overload_returns_503_over_http():
     backend = ToyBackend(**SLOW)
     with live_server(backend, max_waiting=0, max_num_seqs=1) as (url, _):

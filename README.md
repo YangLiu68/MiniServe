@@ -1,8 +1,8 @@
 # MiniServe
 
 **A small LLM inference server with a real continuous-batching engine: paged KV cache, automatic
-prefix caching, chunked prefill, preemption, fair scheduling, streaming, and a benchmark harness
-that measures all of it.** Built to make the ideas behind vLLM-style serving visible, testable
+prefix caching, chunked prefill, preemption, fair scheduling, speculative decoding, streaming,
+and a benchmark harness that measures all of it.** Built to make the ideas behind vLLM-style serving visible, testable
 and measurable on a laptop — not to beat vLLM.
 
 ![MiniServe dashboard: the paged KV cache under load, with prefix blocks shared by 10 sequences](docs/img/dashboard.png)
@@ -18,6 +18,7 @@ prefixes kept in an LRU cache for reuse.</sub>
 | **Own forward pass on a paged KV cache** | Llama/Qwen2/Mistral weights from Hugging Face, our ragged-batch forward (fused QKV and gate/up, gather-based paged attention, RoPE/RMSNorm matched to Transformers). Logits match Transformers within 2e-5; greedy output on SmolLM2 is **token-identical** to the Transformers backend. |
 | **Continuous batching** | Iteration-level scheduler under a token budget: decode-first, chunked prefill, recompute preemption when the KV cache runs out. |
 | **Automatic prefix caching** | Chained blake2b block hashes, ref-counted sharing, LRU eviction of cached-free blocks, invariant-checked by randomized tests. |
+| **Speculative decoding** | n-gram (prompt-lookup) drafts verified in the same batched pass; greedy output token-identical, sampling distribution-preserving (rejection rule, tested statistically); switches itself off for large batches. |
 | **Fairness & backpressure** | FCFS or Virtual Token Counter (OSDI'24) per tenant; per-tenant API keys, rate limits and queue limits; bounded queues by request count *and* queued tokens; KV-capacity validation up front. |
 | **Production plumbing** | OpenAI-compatible `/v1/completions` + `/v1/chat/completions` (works with the official `openai` SDK), SSE streaming with held-back stop strings, cancellation on disconnect, deadlines, Prometheus `/metrics`, JSON logs, readiness/liveness, graceful drain on SIGTERM, Docker, CI. |
 | **Measurement** | `miniserve-bench`: exact-length prompts, closed-loop and Poisson multi-tenant workloads, A/B suites with rotated config order, TTFT/TPOT/ITL/E2E percentiles, server-side batch/KV/memory sampling, Markdown + charts. |
@@ -49,7 +50,7 @@ Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 make install                 # uv sync --extra hf --extra bench
-make test                    # 142 tests, no downloads, CPU only (+4 opt-in real-model)
+make test                    # 190 tests, no downloads, CPU only (+5 opt-in real-model)
 MINISERVE_API_KEY=demo-key uv run miniserve        # SmolLM2-135M on MPS/CUDA/CPU (auto)
 open http://127.0.0.1:8000/dashboard
 ```
@@ -77,7 +78,7 @@ No download? `MINISERVE_BACKEND=toy` (deterministic echo model with a simulated 
 | Endpoint | Auth | Notes |
 |---|---|---|
 | `POST /v1/completions`, `POST /v1/chat/completions` | yes | `max_tokens` (`max_completion_tokens`), `temperature`, `top_p`, `seed`, `stop` (≤4), `stream`, `stream_options`, `user`; extensions `ignore_eos` (vLLM name), `timeout_s`. Unknown fields → 422. |
-| `POST /v1/requests/{id}/cancel` | yes | id from the `X-Request-ID` header |
+| `POST /v1/requests/{id}/cancel` | yes | id from the `X-Request-ID` header; only the owning tenant |
 | `GET /v1/models`, `GET /v1/engine`, `GET /v1/engine/blocks` | yes | model; live scheduler/KV state; per-block map |
 | `GET /metrics` | no | Prometheus (TTFT, TPOT, queue, E2E, step time, batch size, KV usage, prefix hit rate, preemptions, memory) |
 | `GET /healthz`, `GET /readyz`, `GET /dashboard` | no | liveness, readiness (503 while loading/draining), live dashboard |
@@ -97,6 +98,9 @@ No download? `MINISERVE_BACKEND=toy` (deterministic echo model with a simulated 
 | `MINISERVE_KV_CACHE_MB` / `_BLOCK_SIZE` | 256 / 16 | paged KV cache size and block size |
 | `MINISERVE_ENABLE_PREFIX_CACHING` / `_CHUNKED_PREFILL` | true / true | |
 | `MINISERVE_SCHEDULING_POLICY` | `fcfs` | or `fair` (Virtual Token Counter per tenant) |
+| `MINISERVE_SPECULATIVE` / `_NUM_SPECULATIVE_TOKENS` | `none` / 4 | `ngram`: prompt-lookup speculative decoding (native/toy backends) |
+| `MINISERVE_SPEC_MAX_BATCH` | 4 | speculate only while at most this many sequences decode |
+| `MINISERVE_PREFIX_CACHE_SCOPE` | `global` | `tenant`: never share cached blocks across tenants |
 | `MINISERVE_QUANTIZATION` | `none` | `int8` weight-only (native backend) |
 | `MINISERVE_API_KEY` / `_API_KEYS` | – | single key, or `tenant:key,...` for multi-tenant |
 | `MINISERVE_MAX_WAITING` / `_PER_TENANT` / `MAX_QUEUED_TOKENS` | 256 / 64 / 262144 | backpressure |
@@ -119,6 +123,7 @@ src/miniserve/
   scheduler.py      continuous batching: decode-first, chunked prefill, preemption
   policy.py         FCFS and Virtual Token Counter fair queueing
   block_manager.py  paged KV allocator + automatic prefix caching
+  speculative.py    n-gram draft proposer for speculative decoding
   backends/         native (our paged Llama), hf (Transformers baseline), toy
   sampling.py  detokenizer.py  stop.py  metrics.py  ratelimit.py  logging_setup.py
   bench/            load generator, suites, reports
@@ -139,6 +144,6 @@ bench/              suite definitions, step profiler, quantization quality eval
 ## What this is not
 
 Not a vLLM/TGI/llama.cpp replacement: no fused attention kernels, CUDA graphs, tensor
-parallelism, speculative decoding, LoRA, logprobs or multi-node anything. Single-stream speed is
+parallelism, draft-model/EAGLE speculation, LoRA, logprobs or multi-node anything. Single-stream speed is
 bounded by Python kernel-launch overhead (~900 kernel launches per decode step); the point is
 the scheduling and memory-management machinery around the model, built and measured in the open.

@@ -90,3 +90,23 @@ def test_incremental_detokenizer_on_real_tokenizer(models):
         d = IncrementalDetokenizer(tok)
         streamed = "".join(d.add(i) for i in ids) + d.flush()
         assert streamed == tok.decode(ids)
+
+
+def test_speculative_decoding_is_token_identical_on_the_real_model(models):
+    """n-gram speculative decoding (batched, with draft verification) must reproduce the
+    Transformers backend's greedy output exactly, and actually accept drafts on copy tasks."""
+    from miniserve.speculative import NgramProposer
+
+    native, hf = models
+    tasks = [
+        "Correct the spelling: The libary opens at nine oclock every morning, exept on Sundays.",
+        "Rewrite the list as a numbered list:\n- red apples\n- green pears\n- yellow bananas\n",
+        "def add(a, b):\n    return a + b\n\n\n"
+        "def sub(a, b):\n    return a - b\n\n\ndef mul(a, b):",
+    ]
+    ids = [native.tokenizer.apply_chat_template([{"role": "user", "content": t}]) for t in tasks]
+    a, _ = run_sync(native, ids, max_tokens=48, proposer=NgramProposer(4, 3, 2))
+    b, _ = run_sync(hf, ids, max_tokens=48, max_num_seqs=1)
+    for sa, sb in zip(a, b, strict=True):
+        assert sa.output_ids == sb.output_ids
+    assert sum(s.num_accepted_tokens for s in a) >= 10

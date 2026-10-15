@@ -30,6 +30,7 @@ class Sequence:
     arrival: float
     deadline: float
     handle: Any = None  # RequestHandle; the worker only reads its cancel flag
+    cache_salt: bytes = b""  # prefix-cache namespace (per-tenant isolation); b"" = shared
     token_ids: list[int] = field(init=False)  # prompt + generated
     num_prompt_tokens: int = field(init=False)
     num_computed: int = 0  # tokens whose K/V are in the cache
@@ -41,6 +42,9 @@ class Sequence:
     first_scheduled: float | None = None
     detok: Any = None  # IncrementalDetokenizer, created by the engine worker
     stopper: Any = None  # StopChecker when the request has stop strings
+    spec_state: Any = None  # draft proposer's per-sequence index (speculative decoding)
+    num_draft_tokens: int = 0  # draft tokens proposed for this sequence
+    num_accepted_tokens: int = 0  # ... and accepted by the target model
     _block_hashes: list[bytes] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
@@ -64,11 +68,17 @@ class Sequence:
 
         Chaining makes a block's identity depend on its whole prefix, so two prompts that share
         block 3's tokens but differ earlier never alias. blake2b-128 instead of Python's ``hash``:
-        a collision here would silently serve another prompt's K/V.
+        a collision here would silently serve another prompt's K/V. A ``cache_salt`` seeds the
+        chain, so sequences with different salts never share blocks.
         """
         while len(self._block_hashes) <= index:
             i = len(self._block_hashes)
-            parent = self._block_hashes[i - 1] if i else b""
+            if i:
+                parent = self._block_hashes[i - 1]
+            elif self.cache_salt:
+                parent = hashlib.blake2b(b"salt:" + self.cache_salt, digest_size=16).digest()
+            else:
+                parent = b""
             chunk = self.token_ids[i * block_size : (i + 1) * block_size]
             assert len(chunk) == block_size, "only full blocks are hashed"
             data = b"".join(t.to_bytes(4, "little") for t in chunk)
@@ -78,11 +88,24 @@ class Sequence:
 
 @dataclass(eq=False)
 class ScheduledSeq:
-    """``num_tokens`` tokens of ``seq`` starting at position ``start`` run in this step."""
+    """``num_tokens`` tokens of ``seq`` starting at position ``start`` run in this step.
+
+    With speculative decoding a decode entry also carries ``draft``: guessed next tokens that are
+    run in the same forward pass (positions ``start + 1 ...``) and verified against the model's
+    own predictions. The backend sets ``accepted`` to the number of leading draft tokens that
+    were confirmed; those tokens and one more sampled token are appended by the engine.
+    """
 
     seq: Sequence
     start: int
-    num_tokens: int
+    num_tokens: int  # committed tokens (already in ``seq.token_ids``) computed this step
+    draft: tuple[int, ...] = ()
+    accepted: int = 0
+
+    @property
+    def num_query(self) -> int:
+        """Tokens the model actually processes for this entry (committed + draft)."""
+        return self.num_tokens + len(self.draft)
 
     @property
     def sample(self) -> bool:
@@ -91,4 +114,5 @@ class ScheduledSeq:
 
     @property
     def token_ids(self) -> list[int]:
-        return self.seq.token_ids[self.start : self.start + self.num_tokens]
+        ids = self.seq.token_ids[self.start : self.start + self.num_tokens]
+        return ids + list(self.draft) if self.draft else ids

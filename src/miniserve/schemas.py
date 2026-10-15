@@ -19,6 +19,7 @@ class _GenerationParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str | None = None
+    n: int = Field(default=1, ge=1, le=1)  # one choice per request (sent by some clients)
     max_tokens: int | None = Field(default=None, ge=1)
     temperature: float = Field(default=1.0, ge=0.0, le=2.0)
     top_p: float = Field(default=1.0, gt=0.0, le=1.0)
@@ -53,11 +54,30 @@ class CompletionRequest(_GenerationParams):
     prompt: str = Field(min_length=1)
 
 
+class TextPart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"]
+    text: str
+
+
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["system", "user", "assistant"]
-    content: str
+    # "developer" is the newer OpenAI name for system instructions
+    role: Literal["system", "developer", "user", "assistant"]
+    # a string, or an array of text parts (non-text parts such as images are rejected)
+    content: str | list[TextPart]
+
+    @field_validator("role")
+    @classmethod
+    def _developer_is_system(cls, v: str) -> str:
+        return "system" if v == "developer" else v
+
+    @field_validator("content")
+    @classmethod
+    def _join_parts(cls, v: str | list[TextPart]) -> str:
+        return v if isinstance(v, str) else "".join(p.text for p in v)
 
 
 class ChatCompletionRequest(_GenerationParams):

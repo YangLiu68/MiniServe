@@ -7,7 +7,9 @@ completions — the right model for latency-vs-load curves, since closed loops s
 
 Prompts are built to an exact token count with the *server's* tokenizer, from random words, and
 every request gets a unique random prefix so that prefix caching only kicks in where a stream
-explicitly asks for a ``shared_prefix_tokens`` system prompt.
+explicitly asks for a ``shared_prefix_tokens`` system prompt. Alternatively a stream can use real
+``prompts`` (a list, or ``"file.json:key"`` naming a list in a JSON file) — needed where content
+matters, e.g. speculative decoding, whose payoff depends on how much the output copies the input.
 """
 
 from __future__ import annotations
@@ -43,12 +45,21 @@ class Stream:
     warmup_s: float = 0.0  # requests that *start* before this are excluded from the summary
     temperature: float = 0.0
     endpoint: str = "completions"
+    prompts: list[str] | str | None = None  # real prompts (cycled in a seeded shuffled order)
 
     def __post_init__(self) -> None:
         if self.mode not in ("closed", "poisson"):
             raise ValueError(f"unknown stream mode {self.mode!r}")
         if self.num_requests is None and self.duration_s is None:
             raise ValueError("a stream needs num_requests or duration_s")
+        if isinstance(self.prompts, str):
+            path, _, key = self.prompts.partition(":")
+            data = json.loads(Path(path).read_text())
+            self.prompts = data[key] if key else data
+        if self.prompts is not None and not (
+            self.prompts and all(isinstance(p, str) and p for p in self.prompts)
+        ):
+            raise ValueError("prompts must be a non-empty list of non-empty strings")
 
 
 @dataclass
@@ -168,13 +179,18 @@ def build_requests(scenario: Scenario, factory: PromptFactory) -> list[list[Requ
         else:
             n = int(st.concurrency * st.duration_s * 4 + 20)  # >= 4 req/s per worker
         specs, t = [], 0.0
+        order: list[str] = []
         for _ in range(n):
             arrival = None
             if st.mode == "poisson":
                 t += rng.expovariate(st.rate)
                 arrival = t
-            p_len = sample_length(st.prompt_tokens, rng)
-            prompt = factory.make(p_len, rng, prefix)
+            if st.prompts is not None:
+                if not order:  # each pass over the dataset in a new seeded order
+                    order = rng.sample(st.prompts, len(st.prompts))
+                prompt = prefix + order.pop()
+            else:
+                prompt = factory.make(sample_length(st.prompt_tokens, rng), rng, prefix)
             specs.append(
                 RequestSpec(
                     si,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_MODEL_ID = "HuggingFaceTB/SmolLM2-135M-Instruct"
@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     enable_chunked_prefill: bool = True
     enable_prefix_caching: bool = True
     scheduling_policy: Literal["fcfs", "fair"] = "fcfs"
+    # global: prefix-cache blocks shared across tenants | tenant: isolated per tenant
+    prefix_cache_scope: Literal["global", "tenant"] = "global"
+    # Speculative decoding with n-gram (prompt lookup) drafts; native/toy backends.
+    speculative: Literal["none", "ngram"] = "none"
+    num_speculative_tokens: int = Field(4, ge=1, le=16)
+    spec_ngram_max: int = Field(3, ge=1, le=16)
+    spec_ngram_min: int = Field(2, ge=1, le=16)
+    spec_max_batch: int = Field(4, ge=1)  # speculate only while <= this many seqs decode
 
     # --- admission control / backpressure ---
     max_waiting: int = Field(256, ge=0)
@@ -85,6 +93,12 @@ class Settings(BaseSettings):
                 if not sep or not tenant or not key:
                     raise ValueError("api_keys must look like 'tenant:key,tenant2:key2'")
         return v
+
+    @model_validator(mode="after")
+    def _check_spec(self) -> Settings:
+        if self.spec_ngram_min > self.spec_ngram_max:
+            raise ValueError("spec_ngram_min must be <= spec_ngram_max")
+        return self
 
     def key_to_tenant(self) -> dict[str, str]:
         keys = {}

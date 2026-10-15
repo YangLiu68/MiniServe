@@ -33,6 +33,29 @@ def test_chunked_oversize_without_content_length_is_rejected():
     assert r.status_code == 413
 
 
+def test_chunked_oversize_to_the_real_api_is_413_with_openai_error():
+    """Regression: raising inside receive() was swallowed by FastAPI's body parsing (400)."""
+    from miniserve.backends.toy import ToyBackend
+
+    from conftest import app_client
+
+    def chunks():
+        for _ in range(100):
+            yield b"x" * 2000  # 200 kB, no Content-Length
+
+    with app_client(ToyBackend(), max_request_bytes=100_000) as c:
+        r = c.post(
+            "/v1/completions", content=chunks(), headers={"content-type": "application/json"}
+        )
+        assert r.status_code == 413 and r.json()["error"]["code"] == "request_too_large"
+        ok = c.post(
+            "/v1/completions",
+            content=iter([b'{"prompt": "chunked', b' but small", "max_tokens": 3}']),
+            headers={"content-type": "application/json"},
+        )
+        assert ok.status_code == 200 and ok.json()["choices"][0]["text"] == "chu"
+
+
 def test_get_requests_unaffected():
     c = make_client()
     assert c.get("/echo").status_code == 405  # route exists, method not allowed: passthrough

@@ -69,6 +69,12 @@ def engine_config(s: Settings) -> EngineConfig:
         max_waiting=s.max_waiting,
         max_waiting_per_tenant=s.max_waiting_per_tenant,
         max_queued_tokens=s.max_queued_tokens,
+        speculative=s.speculative,
+        num_speculative_tokens=s.num_speculative_tokens,
+        ngram_max=s.spec_ngram_max,
+        ngram_min=s.spec_ngram_min,
+        spec_max_batch=s.spec_max_batch,
+        prefix_cache_scope=s.prefix_cache_scope,
     )
 
 
@@ -245,6 +251,11 @@ class _Formatter:
             "prompt_tokens_details": {"cached_tokens": f.cached_tokens},
         }
         out["miniserve"] = {"timings": f.timings, "preemptions": f.preemptions, "error": f.error}
+        if f.draft_tokens:
+            out["miniserve"]["speculative"] = {
+                "draft_tokens": f.draft_tokens,
+                "accepted_tokens": f.accepted_tokens,
+            }
         return out
 
     def role_chunk(self) -> dict[str, Any] | None:
@@ -393,6 +404,7 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
             "running": e.scheduler.num_running,
             "waiting": e.scheduler.num_waiting,
             "preemptions": e.scheduler.num_preemptions,
+            "speculative": e.speculation_stats(),
             "kv_cache": {
                 "block_size": bm.block_size,
                 "blocks_total": bm.num_blocks,
@@ -446,17 +458,20 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
             "preemptions": e.scheduler.num_preemptions,
             "prefix_hit_tokens": bm.stats.hit_tokens,
             "prefix_queried_tokens": bm.stats.queried_tokens,
+            "speculative": e.speculation_stats(),
         }
 
     @app.get("/dashboard", include_in_schema=False)
     async def dashboard() -> HTMLResponse:
         return HTMLResponse((Path(__file__).parent / "static" / "dashboard.html").read_text())
 
-    @app.post("/v1/requests/{request_id}/cancel", dependencies=[Depends(tenant_of)])
-    async def cancel_request(request_id: str) -> dict[str, Any]:
-        engine, _ = state.require_ready()
-        handle = engine.get(request_id)
-        if handle is None:
+    @app.post("/v1/requests/{request_id}/cancel")
+    async def cancel_request(request_id: str, tenant: str = Depends(tenant_of)) -> dict[str, Any]:
+        # Works while draining (owners may still abandon in-flight work). Another tenant's
+        # request is reported as not found rather than forbidden: ids are not disclosed.
+        engine = state.engine
+        handle = engine.get(request_id) if engine is not None else None
+        if handle is None or handle.tenant != tenant:
             raise APIError(404, f"no active request {request_id!r}", code="request_not_found")
         was = handle.state
         handle.cancel()

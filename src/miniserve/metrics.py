@@ -71,6 +71,12 @@ class Metrics:
         self.preemptions = Counter(
             "miniserve_preemptions", "Sequences preempted (recompute)", registry=r
         )
+        self.spec_draft = Counter(
+            "miniserve_spec_draft_tokens", "Speculative draft tokens verified", registry=r
+        )
+        self.spec_accepted = Counter(
+            "miniserve_spec_accepted_tokens", "Speculative draft tokens accepted", registry=r
+        )
         self.step_time = Histogram(
             "miniserve_step_duration_seconds",
             "Model step wall time",
@@ -115,6 +121,9 @@ class Metrics:
         self.batch_tokens.observe(out.num_tokens)
         if out.preempted:
             self.preemptions.inc(len(out.preempted))
+        if out.num_draft_tokens:
+            self.spec_draft.inc(out.num_draft_tokens)
+            self.spec_accepted.inc(sum(s.accepted for s in out.scheduled))
         self._set_engine_gauges(engine)
 
     def _set_engine_gauges(self, engine: Engine) -> None:

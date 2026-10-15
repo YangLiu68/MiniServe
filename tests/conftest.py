@@ -54,6 +54,7 @@ class RecordingBackend:
             "block_size",
             "num_kv_blocks",
             "supports_prefix_caching",
+            "supports_speculation",
         ):
             setattr(self, attr, getattr(inner, attr))
         self.produced = 0  # sampled tokens
@@ -66,7 +67,7 @@ class RecordingBackend:
         self.max_batch = max(self.max_batch, len(batch))
         self.seen.update(s.seq.request_id for s in batch)
         out = self.inner.execute(batch)
-        self.produced += sum(t is not None for t in out)
+        self.produced += sum(t is not None for t in out) + sum(s.accepted for s in batch)
         return out
 
     def release(self, seq, preempted=False):
@@ -149,9 +150,12 @@ def run_sync(
     policy=None,
     temperature=0.0,
     seed=None,
+    proposer=None,
     **sched_cfg,
 ):
-    """Drive scheduler + backend synchronously (no threads/asyncio); returns (seqs, scheduler)."""
+    """Drive scheduler + backend synchronously (no threads/asyncio); returns (seqs, scheduler).
+
+    With a ``proposer`` (speculative decoding), verified draft tokens are appended too."""
     from miniserve.block_manager import BlockManager
     from miniserve.policy import FCFSPolicy
     from miniserve.scheduler import Scheduler, SchedulerConfig
@@ -167,6 +171,7 @@ def run_sync(
         bm,
         policy if policy is not None else FCFSPolicy(),
         on_release=backend.release,
+        proposer=proposer,
     )
     seqs = []
     for i, p in enumerate(prompts):
@@ -179,11 +184,18 @@ def run_sync(
         toks = backend.execute(out.scheduled)
         sched.complete_step(out)
         for s, t in zip(out.scheduled, toks, strict=True):
-            if t is not None:
-                s.seq.token_ids.append(t)
-                if s.seq.num_output_tokens >= max_tokens:
-                    sched.finish(s.seq)
+            if t is None:
+                continue
+            s.seq.num_draft_tokens += len(s.draft)
+            s.seq.num_accepted_tokens += s.accepted
+            s.seq.token_ids += [*s.draft[: s.accepted], t]  # drafts never overshoot max_tokens
+            assert s.seq.num_output_tokens <= max_tokens
+            if s.seq.num_output_tokens >= max_tokens:
+                sched.finish(s.seq)
+            else:
+                sched.accept_draft(s.seq, s.accepted)
         steps += 1
         assert steps < 100_000
         bm.check_invariants(sched.running)
+    sched.num_steps = steps
     return seqs, sched

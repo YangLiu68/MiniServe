@@ -1,0 +1,100 @@
+{
+  "name": "speculative",
+  "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
+  "rounds": 2,
+  "port": 8100,
+  "description": "n-gram (prompt lookup) speculative decoding vs plain decoding, SmolLM2-135M on MPS fp16, greedy (outputs are the same text in both configs, so per-token latency is directly comparable). 'copy' prompts ask for edits/reformatting of a given text; 'open' prompts are free-form. Speculation is used only while <= 4 sequences decode, so the 16-client scenario checks that it switches off without a regression. Prefix caching off to isolate the effect.",
+  "configs": [
+    {
+      "name": "spec-off",
+      "env": {
+        "MINISERVE_SPECULATIVE": "none"
+      }
+    },
+    {
+      "name": "spec-ngram",
+      "env": {
+        "MINISERVE_SPECULATIVE": "ngram",
+        "MINISERVE_NUM_SPECULATIVE_TOKENS": "4"
+      }
+    }
+  ],
+  "base_env": {
+    "MINISERVE_BACKEND": "native",
+    "MINISERVE_DEVICE": "mps",
+    "MINISERVE_DTYPE": "float16",
+    "MINISERVE_KV_CACHE_MB": "512",
+    "MINISERVE_REQUEST_TIMEOUT_S": "900",
+    "MINISERVE_MAX_WAITING": "1024",
+    "MINISERVE_MAX_WAITING_PER_TENANT": "1024",
+    "MINISERVE_ENABLE_PREFIX_CACHING": "false",
+    "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.5",
+    "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.4"
+  },
+  "scenarios": [
+    {
+      "name": "copy-c1",
+      "seed": 1,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 12,
+          "prompts": "bench/data/spec_prompts.json:copy",
+          "endpoint": "chat",
+          "max_tokens": 256,
+          "temperature": 0.0
+        }
+      ]
+    },
+    {
+      "name": "open-c1",
+      "seed": 2,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 1,
+          "num_requests": 12,
+          "prompts": "bench/data/spec_prompts.json:open",
+          "endpoint": "chat",
+          "max_tokens": 256,
+          "temperature": 0.0
+        }
+      ]
+    },
+    {
+      "name": "copy-c4",
+      "seed": 3,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 4,
+          "num_requests": 24,
+          "prompts": "bench/data/spec_prompts.json:copy",
+          "endpoint": "chat",
+          "max_tokens": 256,
+          "temperature": 0.0
+        }
+      ]
+    },
+    {
+      "name": "copy-c16",
+      "seed": 4,
+      "streams": [
+        {
+          "tenant": "load",
+          "mode": "closed",
+          "concurrency": 16,
+          "num_requests": 48,
+          "prompts": "bench/data/spec_prompts.json:copy",
+          "endpoint": "chat",
+          "max_tokens": 256,
+          "temperature": 0.0
+        }
+      ]
+    }
+  ]
+}

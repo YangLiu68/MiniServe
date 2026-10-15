@@ -72,6 +72,32 @@ def test_shared_prefix_is_reused_and_refcounted():
     bm.check_invariants([c])
 
 
+def test_readmission_after_preemption_does_not_inflate_hit_stats():
+    """Regression: recompute after preemption was counted as a prefix-cache query + hit."""
+    bm = BlockManager(16, BS)
+    s = seq(range(13))
+    run_prefill(bm, s)
+    assert (bm.stats.queried_tokens, bm.stats.hit_tokens) == (13, 0)
+    bm.free(s)  # preempted: its full blocks stay cached
+    s.num_preemptions = 1
+    assert run_prefill(bm, s).num_tokens == 12  # recompute reuses its own blocks...
+    assert (bm.stats.queried_tokens, bm.stats.hit_tokens) == (13, 0)  # ...but is not a query
+
+
+def test_cache_salt_isolates_identical_prompts():
+    bm = BlockManager(16, BS)
+    a = seq(range(9))
+    a.cache_salt = b"alice"
+    b = seq(range(9))
+    b.cache_salt = b"bob"
+    c = seq(range(9))
+    c.cache_salt = b"alice"
+    run_prefill(bm, a)
+    assert run_prefill(bm, b).num_tokens == 0  # other tenant: no sharing
+    assert run_prefill(bm, c).num_tokens == 8  # same tenant: shared
+    bm.check_invariants([a, b, c])
+
+
 def test_chained_hash_does_not_alias_same_block_at_different_prefix():
     bm = BlockManager(16, BS)
     a = seq([1, 2, 3, 4, 5, 6, 7, 8, 0])
