@@ -86,3 +86,25 @@ def test_log_formatters_include_structured_fields():
     assert "request finished" in text and "request_id=cmpl-1" in text and "ttft_ms=12.5" in text
     obj = json.loads(JsonFormatter().format(rec))
     assert obj["msg"] == "request finished" and obj["reason"] == "stop" and obj["level"] == "INFO"
+
+
+def test_all_committed_suites_are_valid():
+    from pathlib import Path
+
+    from miniserve.config import Settings
+
+    files = sorted(Path(__file__).parent.parent.joinpath("bench", "suites").glob("*.json"))
+    assert len(files) >= 7
+    for f in files:
+        suite = Suite.load(f)
+        assert suite.configs and suite.scenarios, f.name
+        for cfg in suite.configs:
+            env = {**suite.base_env, **cfg.env}
+            fields = {
+                k.removeprefix("MINISERVE_").lower(): v
+                for k, v in env.items()
+                if k.startswith("MINISERVE_")
+            }
+            Settings(_env_file=None, **fields)  # every MINISERVE_* override must be valid
+            unknown = set(fields) - set(Settings.model_fields)
+            assert not unknown, f"{f.name}/{cfg.name}: unknown settings {unknown}"

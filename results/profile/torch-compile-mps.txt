@@ -1,0 +1,3 @@
+B=  1 eager   13.42 ms | compiled  331.32 ms | speedup 0.04x | max|dlogit| 0.0312 | first-call+bench 138s
+B=  8 eager   32.33 ms | compiled  335.42 ms | speedup 0.10x | max|dlogit| 0.0469 | first-call+bench 234s
+B= 32 eager   62.62 ms | compiled  342.69 ms | speedup 0.18x | max|dlogit| 0.0625 | first-call+bench 10s

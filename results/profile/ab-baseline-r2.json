@@ -1,0 +1,56 @@
+{
+  "device": "mps",
+  "dtype": "float16",
+  "context": 256,
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "125472ab17c8dc97ce6cef81059f0288f2c11e91",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      10.19,
+      11.23,
+      12.83
+    ],
+    "time": "2026-10-15T02:39:34-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 10.3/10 cores, unmanaged cpu 5.1, lease cpu cap 4.4 (free 0.4) | RAM avail 5.0G, lease mem free 0.1G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 71.4\u00b0C avg 62.4\u00b0C"
+  },
+  "decode": [
+    {
+      "batch": 1,
+      "step_ms": 15.81,
+      "tokens_per_s": 63.3
+    },
+    {
+      "batch": 8,
+      "step_ms": 30.54,
+      "tokens_per_s": 262.0
+    },
+    {
+      "batch": 32,
+      "step_ms": 62.1,
+      "tokens_per_s": 515.3
+    }
+  ],
+  "prefill": [
+    {
+      "tokens": 256,
+      "step_ms": 52.68,
+      "tokens_per_s": 4859.2
+    }
+  ],
+  "hf_decode": [
+    {
+      "batch": 1,
+      "step_ms": 22.56,
+      "tokens_per_s": 44.3
+    }
+  ]
+}

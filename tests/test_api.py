@@ -348,3 +348,28 @@ def test_block_map_requires_auth_when_enabled():
     with app_client(ToyBackend(), api_key="k") as c:
         assert c.get("/v1/engine/blocks").status_code == 401
         assert c.get("/dashboard").status_code == 200  # static page; it asks for the key
+
+
+def test_oversized_request_body_is_413():
+    with app_client(ToyBackend(), max_request_bytes=4096, max_prompt_chars=10**6) as c:
+        r = complete(c, prompt="x" * 5000)
+        assert r.status_code == 413 and r.json()["error"]["code"] == "request_too_large"
+        assert complete(c, prompt="x" * 3000, max_tokens=1).status_code == 200
+
+
+def test_env_example_is_a_valid_env_file():
+    # Regression: empty values (e.g. MINISERVE_TORCH_THREADS=) crashed startup when the
+    # documented `cp .env.example .env` was followed.
+    from pathlib import Path
+
+    from miniserve.config import Settings
+
+    example = Path(__file__).parent.parent / ".env.example"
+    s = Settings(_env_file=str(example))
+    assert s.backend == "native" and s.torch_threads is None and not s.auth_enabled
+    documented = {
+        ln.split("=")[0].removeprefix("MINISERVE_").lower()
+        for ln in example.read_text().splitlines()
+        if ln.startswith("MINISERVE_")
+    }
+    assert documented == set(Settings.model_fields)  # every setting documented, none stale

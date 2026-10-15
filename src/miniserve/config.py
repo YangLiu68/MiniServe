@@ -14,7 +14,9 @@ DEFAULT_MODEL_REVISION = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MINISERVE_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MINISERVE_", env_file=".env", extra="ignore", env_ignore_empty=True
+    )
 
     # --- backend / model ---
     # native: our paged-KV Llama engine | hf: Transformers DynamicCache baseline
@@ -72,6 +74,7 @@ class Settings(BaseSettings):
     log_level: str = "info"
     log_format: Literal["text", "json"] = "text"
     drain_timeout_s: float = Field(30.0, ge=0)
+    max_request_bytes: int = Field(1 << 20, ge=1024)  # body size limit (413 above it)
 
     @field_validator("api_keys")
     @classmethod

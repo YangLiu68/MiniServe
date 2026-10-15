@@ -4,7 +4,7 @@ install:            ## dev environment (torch CPU on Linux, MPS-capable on macOS
 	uv sync --extra hf --extra bench
 
 lint:
-	uv run ruff check src tests bench && uv run ruff format --check src tests bench
+	uv run ruff check src tests bench examples && uv run ruff format --check src tests bench examples
 
 test:               ## toy + tiny random models; no downloads
 	uv run pytest -q

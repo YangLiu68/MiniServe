@@ -1,0 +1,24 @@
+== round 1 baseline
+native decode  B=  1:   13.40 ms/step      74.6 tok/s
+native decode  B=  8:   29.38 ms/step     272.3 tok/s
+native decode  B= 32:   61.16 ms/step     523.2 tok/s
+native prefill N=  256:   45.17 ms     5667.4 tok/s
+hf     decode  B=  1:   22.41 ms/step      44.6 tok/s
+== round 1 fused
+native decode  B=  1:   16.16 ms/step      61.9 tok/s
+native decode  B=  8:   31.17 ms/step     256.7 tok/s
+native decode  B= 32:   67.75 ms/step     472.3 tok/s
+native prefill N=  256:   52.31 ms     4894.3 tok/s
+hf     decode  B=  1:   31.32 ms/step      31.9 tok/s
+== round 2 baseline
+native decode  B=  1:   15.81 ms/step      63.3 tok/s
+native decode  B=  8:   30.54 ms/step     262.0 tok/s
+native decode  B= 32:   62.10 ms/step     515.3 tok/s
+native prefill N=  256:   52.68 ms     4859.2 tok/s
+hf     decode  B=  1:   22.56 ms/step      44.3 tok/s
+== round 2 fused
+native decode  B=  1:   18.50 ms/step      54.1 tok/s
+native decode  B=  8:   30.72 ms/step     260.4 tok/s
+native decode  B= 32:   65.70 ms/step     487.1 tok/s
+native prefill N=  256:   60.36 ms     4241.1 tok/s
+hf     decode  B=  1:   23.29 ms/step      42.9 tok/s

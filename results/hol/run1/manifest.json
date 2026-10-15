@@ -1,0 +1,90 @@
+{
+  "suite": "hol",
+  "description": "M2/M3 - head-of-line blocking. decode-hol: a 'batch' tenant keeps 3 long generations (64->192 tokens) in flight while a 'chat' tenant sends short requests (32->16) as a Poisson process (0.3 req/s); compares one-at-a-time FIFO with continuous batching. prefill-hol: a 'docs' tenant sends 1500-token prompts while a 'chat' tenant streams 96-token answers; compares chunked prefill (256-token step budget) with unchunked prefill (whole prompt in one step).",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "125472ab17c8dc97ce6cef81059f0288f2c11e91",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      10.04,
+      11.95,
+      15.7
+    ],
+    "time": "2026-10-15T02:24:28-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 10.0/10 cores, unmanaged cpu 5.6, lease cpu cap 4.0 (free 0.0) | RAM avail 5.8G, lease mem free 0.0G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 68.2\u00b0C avg 60.4\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "fifo-sequential",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "1",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "2048"
+      },
+      "external": null
+    },
+    {
+      "name": "continuous-chunked",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "256"
+      },
+      "external": null
+    },
+    {
+      "name": "continuous-unchunked",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32",
+        "MINISERVE_MAX_NUM_BATCHED_TOKENS": "2048",
+        "MINISERVE_ENABLE_CHUNKED_PREFILL": "false"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "decode-hol",
+    "prefill-hol"
+  ],
+  "runs": [
+    "decode-hol__fifo-sequential__r0.json",
+    "prefill-hol__fifo-sequential__r0.json",
+    "decode-hol__continuous-chunked__r0.json",
+    "prefill-hol__continuous-chunked__r0.json",
+    "decode-hol__continuous-unchunked__r0.json",
+    "prefill-hol__continuous-unchunked__r0.json",
+    "decode-hol__continuous-chunked__r1.json",
+    "prefill-hol__continuous-chunked__r1.json",
+    "decode-hol__continuous-unchunked__r1.json",
+    "prefill-hol__continuous-unchunked__r1.json",
+    "decode-hol__fifo-sequential__r1.json",
+    "prefill-hol__fifo-sequential__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "125472ab17c8dc97ce6cef81059f0288f2c11e91",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      13.2,
+      11.74,
+      13.19
+    ],
+    "time": "2026-10-15T02:37:46-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 12.5/10 cores, unmanaged cpu 6.1, lease cpu cap 4.0 (free 1.0) | RAM avail 3.3G, lease mem free 0.0G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 67.8\u00b0C avg 60.9\u00b0C"
+  }
+}

@@ -32,6 +32,7 @@ from miniserve.engine import (
     TokenEvent,
 )
 from miniserve.metrics import Metrics
+from miniserve.middleware import BodySizeLimitMiddleware
 from miniserve.ratelimit import RateLimiter
 from miniserve.schemas import ChatCompletionRequest, CompletionRequest
 
@@ -311,6 +312,8 @@ def create_app(settings: Settings | None = None, backend: Backend | None = None)
 
     app = FastAPI(title="MiniServe", version=__version__, lifespan=lifespan)
     app.state.miniserve = state
+    # Reject oversized bodies before FastAPI buffers and parses them (memory-exhaustion guard).
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
 
     @app.exception_handler(APIError)
     async def _api_error(request: Request, exc: APIError) -> JSONResponse:
