@@ -40,18 +40,27 @@ real uvicorn servers, real sockets and a real SIGTERM, and asserts on **compute 
 | Remove the three disconnect → cancel paths in `server.py` | both live disconnect tests fail |
 | Remove the engine's post-step cancellation check | `test_step_finishing_after_cancel_is_discarded` fails |
 | Remove the causal mask in `build_metadata` | 6 native tests fail (logits, chunked, mixed batch, greedy, prefix, preemption) |
+| Restore `DRAIN_TIMEOUT_S` → `None` conversion | zero-drain SIGTERM test fails |
+| Restore the 8×32 int8 probe (MPS) | probe/dispatch test fails |
+| Remove the fp32 upcast in the int8 fallback | forced-fallback fp16 overflow test fails |
 
-## Bugs found by tests (and fixed)
+## Bugs found by testing (all fixed, each with a regression test)
 
-1. App closed an **injected** backend at shutdown (real-model fixture reused across apps).
-2. A disconnect during an uninterruptible step whose token was EOS was reported as `stop`
-   (found on the real model) → re-check cancel/deadline after every step.
-3. "Request started" was delivered *after* the first step (up to a full prefill late), so a
-   cancel during the first prefill took the "still queued" path → post it before the step.
-4. `max_waiting=0` rejected every request even when idle (a request is briefly "waiting" before
-   it starts) → admission counts in-flight against `max_num_seqs + max_waiting`.
-5. Test-helper bug worth remembering: `policy or FCFSPolicy()` silently replaced an *empty*
-   `FairPolicy` (it defines `__len__`, so it is falsy).
+| # | Bug | How it was found |
+|---|---|---|
+| 1 | App closed an **injected** backend at shutdown | real-model fixture reused across two apps |
+| 2 | Disconnect during an uninterruptible step whose token was EOS reported as `stop` | real-model run (client hung up mid-prefill) |
+| 3 | "Request started" delivered *after* the first step, so a cancel during the first prefill took the "queued" path | engine test |
+| 4 | `max_waiting=0` rejected every request even when idle | live overload test |
+| 5 | `MINISERVE_DRAIN_TIMEOUT_S=0` passed to uvicorn as `None` = wait forever | code review → real-SIGTERM test |
+| 6 | Dashboard counted cached blocks as "in use" (`"c" >= "1"` is true in JS) | headless-Chrome screenshot |
+| 7 | Example script hung forever (bare `wait` also waited on the server) and didn't show which tenant was which | running the example |
+| 8 | No request-body size limit: a huge body is buffered before validation | code review → 413 middleware tests |
+| 9 | `cp .env.example .env` (as documented) crashed startup on empty values | test that loads the example as an env file |
+| 10 | **int8 on MPS produced only token 0.** The capability probe used an 8×32 weight; the MPS kernel needs N, K multiples of 32, so MPS was marked unsupported and every call took the dequantize fallback, which multiplied by raw int8 values before scaling and overflowed fp16 → NaN logits | quant benchmark (empty text) → bisect of the original code vs single-change variants on the exact benchmark prompts; two plausible hypotheses (fused-kernel overflow, fp16-subnormal scales) were tested and refuted first |
+
+A test-helper pitfall worth remembering: `policy or FCFSPolicy()` silently replaced an *empty*
+`FairPolicy` (it defines `__len__`, so it is falsy).
 
 ## Latest results
 

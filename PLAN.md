@@ -86,7 +86,9 @@ MiniServe is an educational but real text-generation server. The portfolio point
 - **Ops**: Dockerfile (CPU torch via uv index), compose + Prometheus, GitHub Actions.
 - **Bugs found and fixed** (each with a regression test): "started" delivered after the first
   step; `max_waiting=0` rejected everything; `DRAIN_TIMEOUT_S=0` meant "wait forever"; dashboard
-  counted cached blocks as in use; example script hung on `wait`; no request-body size limit.
+  counted cached blocks as in use; example script hung on `wait`; no request-body size limit;
+  `cp .env.example .env` crashed startup; int8 on MPS emitted only token 0 (capability probe
+  used an invalid shape → fp16-overflowing fallback; root-caused by bisecting variants).
 - **Benchmarks** run under resource-manager leases on the shared machine; see BENCHMARK.md for
   results, spreads and caveats.
 
