@@ -1,7 +1,7 @@
 """Opt-in tests against the real default model (downloads ~270 MB on first run).
 
 Run with: MINISERVE_RUN_REAL_MODEL_TESTS=1 pytest -m real_model
-CPU + float32 for determinism across machines.
+CPU + float32 so results are deterministic across machines.
 """
 
 import pytest
@@ -11,39 +11,75 @@ pytest.importorskip("torch")
 from miniserve.config import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION  # noqa: E402
 from miniserve.detokenizer import IncrementalDetokenizer  # noqa: E402
 
-from conftest import app_client, parse_sse  # noqa: E402
+from conftest import app_client, parse_sse, run_sync  # noqa: E402
 
 pytestmark = pytest.mark.real_model
 
 
 @pytest.fixture(scope="module")
-def smollm():
-    from miniserve.backends.hf import HFBackend
+def models():
+    from miniserve.backends.hf import HFBackend, load_hf_model
+    from miniserve.backends.native import NativeBackend
 
-    backend = HFBackend.from_pretrained(DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION, "cpu", "float32")
-    yield backend
-    backend.close()
+    hf_model, tok = load_hf_model(
+        DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION, "cpu", __import__("torch").float32
+    )
+    native = NativeBackend.from_hf_model(hf_model, tok, DEFAULT_MODEL_ID, kv_cache_mb=64)
+    hf = HFBackend(hf_model, tok, DEFAULT_MODEL_ID, kv_cache_mb=64)
+    return native, hf
 
 
-def test_greedy_completion_is_sensible(smollm):
-    with app_client(smollm) as c:
-        body = {"prompt": "The capital of France is", "max_tokens": 8, "temperature": 0}
-        r = c.post("/v1/completions", json=body)
-        assert r.status_code == 200
+PROMPTS = [
+    "The capital of France is",
+    "def fibonacci(n):",
+    "Once upon a time, in a small village by the sea,",
+    "List three primary colors:",
+]
+
+
+def test_native_engine_matches_transformers_greedy(models):
+    native, hf = models
+    ids = [native.tokenizer.encode(p) for p in PROMPTS]
+    a, _ = run_sync(native, ids, max_tokens=24, max_num_batched_tokens=32)  # batched + chunked
+    b, _ = run_sync(hf, ids, max_tokens=24, max_num_seqs=1)  # sequential DynamicCache
+    for sa, sb in zip(a, b, strict=True):
+        assert sa.output_ids == sb.output_ids
+
+
+def test_greedy_completion_and_chat_are_sensible(models):
+    native, _ = models
+    with app_client(native) as c:
+        r = c.post(
+            "/v1/completions",
+            json={"prompt": "The capital of France is", "max_tokens": 8, "temperature": 0},
+        )
         assert "Paris" in r.json()["choices"][0]["text"]
+        r = c.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "What is the capital of France?"}],
+                "max_tokens": 24,
+                "temperature": 0,
+            },
+        )
+        assert "Paris" in r.json()["choices"][0]["message"]["content"]
 
 
-def test_stream_equals_non_stream(smollm):
-    with app_client(smollm) as c:
-        body = {"prompt": "Write a haiku about caches:", "max_tokens": 40, "temperature": 0}
+def test_stream_equals_non_stream_and_prefix_cache_hits(models):
+    native, _ = models
+    system = "You are a concise assistant that answers in one sentence. " * 4
+    with app_client(native) as c:
+        body = {"prompt": system + "Why is the sky blue?", "max_tokens": 32, "temperature": 0}
         full = c.post("/v1/completions", json=body).json()
         chunks, done = parse_sse(c.post("/v1/completions", json={**body, "stream": True}).text)
         assert done
         assert "".join(ch["choices"][0]["text"] for ch in chunks) == full["choices"][0]["text"]
+        cached = chunks[-1]["usage"]["prompt_tokens_details"]["cached_tokens"]
+        assert cached >= 48  # second identical prompt reuses full blocks
 
 
-def test_incremental_detokenizer_on_real_tokenizer(smollm):
-    tok = smollm.tokenizer
+def test_incremental_detokenizer_on_real_tokenizer(models):
+    tok = models[0].tokenizer
     for text in [
         "Hello world, this is a test.",
         "  leading spaces and\nnewlines\n\n  ",

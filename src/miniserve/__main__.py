@@ -8,31 +8,45 @@ import sys
 import uvicorn
 
 from miniserve.config import Settings
+from miniserve.logging_setup import configure_logging
 from miniserve.server import create_app
+
+
+class DrainingServer(uvicorn.Server):
+    """On SIGTERM/SIGINT: fail readiness and refuse new work first, then let uvicorn stop
+    accepting connections and wait (``timeout_graceful_shutdown``) for in-flight streams."""
+
+    def __init__(self, config: uvicorn.Config, app) -> None:
+        super().__init__(config)
+        self._state = app.state.miniserve
+
+    def handle_exit(self, sig, frame) -> None:
+        self._state.begin_drain()
+        super().handle_exit(sig, frame)
 
 
 def main() -> None:
     settings = Settings()
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    configure_logging(settings.log_level, settings.log_format)
     try:
         settings.check_bind_safety()
     except RuntimeError as e:
         print(f"miniserve: {e}", file=sys.stderr)
         sys.exit(2)
-    if not settings.api_key:
+    if not settings.auth_enabled:
         logging.getLogger("miniserve").warning(
-            "MINISERVE_API_KEY is not set: serving WITHOUT authentication on %s", settings.host
+            "no API key configured: serving WITHOUT authentication", extra={"host": settings.host}
         )
-    uvicorn.run(
-        create_app(settings),
+    app = create_app(settings)
+    config = uvicorn.Config(
+        app,
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,
-        timeout_graceful_shutdown=10,
+        log_config=None,  # keep our structured handler
+        timeout_graceful_shutdown=int(settings.drain_timeout_s) or None,
     )
+    DrainingServer(config, app).run()
 
 
 if __name__ == "__main__":

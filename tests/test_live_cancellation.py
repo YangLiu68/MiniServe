@@ -40,9 +40,9 @@ def test_stream_disconnect_stops_generation():
                     if received >= 5:
                         break  # leaving the block closes the connection mid-stream
         assert wait_until(lambda: engine.num_active == 0), "request still active after disconnect"
-        produced = backend.yielded
+        produced = backend.produced
         time.sleep(0.2)  # would be ~20 more tokens if generation continued
-        assert backend.yielded == produced
+        assert backend.produced == produced
         assert produced < 60, produced  # far fewer than the 300 requested
 
 
@@ -59,9 +59,9 @@ def test_non_stream_disconnect_stops_generation():
         except httpx.ReadTimeout:
             pass
         assert wait_until(lambda: engine.num_active == 0), "request still active after disconnect"
-        produced = backend.yielded
+        produced = backend.produced
         time.sleep(0.2)
-        assert backend.yielded == produced
+        assert backend.produced == produced
         assert produced < 80, produced
 
 
@@ -86,12 +86,12 @@ def test_cancel_endpoint_ends_stream_with_cancelled():
         assert cancel_resp["r"].json()["state"] == "running"
         assert lines[-1] == "data: [DONE]"
         assert '"finish_reason": "cancelled"' in lines[-2]
-        assert backend.yielded < 60
+        assert backend.produced < 60
 
 
 def test_overload_returns_503_over_http():
     backend = ToyBackend(**SLOW)
-    with live_server(backend, max_pending=0) as (url, _):
+    with live_server(backend, max_waiting=0, max_num_seqs=1) as (url, _):
         results = {}
 
         def long_request():

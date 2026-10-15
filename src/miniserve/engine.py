@@ -1,43 +1,49 @@
-"""Generation engine (M1): one model, one worker thread, a bounded FIFO of waiting requests.
+"""Generation engine: asyncio front end + a worker thread running the continuous-batching loop.
 
 Threading model
 ---------------
-* The asyncio event loop owns all request state. ``RequestHandle`` fields are only mutated on the
-  loop thread (the worker posts events back with ``call_soon_threadsafe``).
-* A single worker thread runs the backend's blocking token iterator, so the model is never used
-  concurrently. Between tokens it checks the request's cancel flag (a ``threading.Event``) and
-  deadline, so cancellation/timeouts take effect within one decode step. A forward pass that is
-  already running cannot be interrupted (documented limitation; prefill of a long prompt is the
-  worst case).
-* The consumer side (``RequestHandle.events``) enforces the deadline as well, so a client gets its
-  timeout on time even if the worker is stuck inside a long forward pass.
+* **Event-loop thread** owns ``RequestHandle`` objects (what HTTP handlers see): admission
+  control, cancellation requests, the per-request event queue and the consumer-side deadline.
+* **Worker thread** owns everything else — ``Scheduler``, ``BlockManager``, ``Sequence`` state and
+  the backend (model + KV cache) — and runs::
 
-M2 will replace the FIFO with a fair scheduler; M3 will replace "one request at a time" with
-iteration-level batching. The handle/event interface is meant to survive both.
+      drain inbox -> reap cancelled/expired -> schedule() -> backend.execute(batch)
+      -> append tokens, detokenize, check stop conditions -> post events back to the loop
+
+* The two sides communicate only through a locked inbox (new sequences), a per-request
+  ``threading.Event`` (cancel flag), and ``loop.call_soon_threadsafe`` (one batch of events per
+  step). No asyncio object is touched from the worker; no scheduler state from the loop.
+
+Cancellation and deadlines are checked before each step (a cancelled sequence is not scheduled)
+and again after it (a token computed after cancel/deadline is discarded, never delivered).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from miniserve.backends.base import Backend, SamplingParams
+from miniserve.block_manager import BlockManager
 from miniserve.detokenizer import IncrementalDetokenizer
+from miniserve.policy import make_policy
+from miniserve.scheduler import Scheduler, SchedulerConfig, SchedulerOutput
+from miniserve.sequence import SeqStatus, Sequence
+from miniserve.stop import StopChecker
 
 log = logging.getLogger(__name__)
 
 
 class FinishReason(StrEnum):
-    STOP = "stop"  # EOS sampled
+    STOP = "stop"  # EOS sampled or a stop string matched
     LENGTH = "length"  # max_tokens reached
     CANCELLED = "cancelled"  # client disconnect, cancel endpoint, or shutdown
     TIMEOUT = "timeout"  # request deadline passed (queue wait + generation)
@@ -45,7 +51,9 @@ class FinishReason(StrEnum):
 
 
 class EngineOverloaded(Exception):
-    pass
+    def __init__(self, message: str, per_tenant: bool = False) -> None:
+        super().__init__(message)
+        self.per_tenant = per_tenant
 
 
 class EngineClosed(Exception):
@@ -53,11 +61,29 @@ class EngineClosed(Exception):
 
 
 @dataclass
+class EngineConfig:
+    max_num_seqs: int = 32
+    max_num_batched_tokens: int = 512
+    enable_chunked_prefill: bool = True
+    enable_prefix_caching: bool = True
+    policy: str = "fcfs"
+    max_waiting: int = 256  # requests allowed to wait beyond the max_num_seqs running slots
+    max_waiting_per_tenant: int = 64
+    max_queued_tokens: int = 1 << 20  # prompt tokens waiting (bounds queue memory)
+    watermark: float = 0.01  # fraction of KV blocks kept free when admitting
+
+
+@dataclass
 class TokenEvent:
     index: int  # 0-based position in the completion
     token_id: int
-    text: str  # newly stable text; may be "" while a multi-byte character is incomplete
+    text: str  # newly stable text; may be "" (incomplete UTF-8 or held back for stop strings)
     t: float  # time.monotonic() when the worker produced it
+
+
+@dataclass
+class _Started:
+    t: float
 
 
 @dataclass
@@ -87,27 +113,33 @@ class Timings:
 class FinishEvent:
     reason: FinishReason
     prompt_tokens: int
-    completion_tokens: int
-    text: str = ""  # detokenizer tail flushed at the end
+    completion_tokens: int = 0
+    text: str = ""  # tail flushed at the end
     error: str | None = None
     timings: dict[str, float | None] = field(default_factory=dict)
+    cached_tokens: int = 0
+    preemptions: int = 0
 
 
 Event = TokenEvent | FinishEvent
 
 
 class RequestHandle:
+    """Loop-thread view of one request."""
+
     def __init__(
         self,
         prompt_ids: list[int],
         params: SamplingParams,
         timeout_s: float,
+        tenant: str,
         on_finish: Callable[[RequestHandle], None],
-        request_id: str | None = None,
+        wake: Callable[[], None],
     ) -> None:
-        self.id = request_id or f"cmpl-{uuid.uuid4().hex[:24]}"
+        self.id = f"cmpl-{uuid.uuid4().hex[:24]}"
         self.prompt_ids = prompt_ids
         self.params = params
+        self.tenant = tenant
         self.timings = Timings(arrival=time.monotonic())
         self.deadline = self.timings.arrival + timeout_s
         self.state: Literal["queued", "running", "finished"] = "queued"
@@ -117,16 +149,17 @@ class RequestHandle:
         self._cancel_reason = FinishReason.CANCELLED
         self._events: asyncio.Queue[Event] = asyncio.Queue()
         self._on_finish = on_finish
+        self._wake = wake
 
-    # ---- loop-thread API ----
     def cancel(self, reason: FinishReason = FinishReason.CANCELLED) -> bool:
         """Request cancellation. Returns False if the request already finished."""
         if self.finish is not None:
             return False
         self._cancel_reason = reason
         self._cancel_flag.set()
-        if self.state == "queued":  # nothing running: finish right away
-            self._push(self._make_finish(reason))
+        if self.state == "queued":  # not running yet: answer immediately
+            self._push(FinishEvent(reason, len(self.prompt_ids)))
+        self._wake()  # let the worker free its resources promptly
         return True
 
     async def events(self) -> AsyncIterator[Event]:
@@ -148,15 +181,12 @@ class RequestHandle:
             if isinstance(ev, FinishEvent):
                 return
 
-    # ---- internals ----
     def _expire(self) -> None:
         if self.finish is None:
             self._cancel_reason = FinishReason.TIMEOUT
             self._cancel_flag.set()
-            self._push(self._make_finish(FinishReason.TIMEOUT))
-
-    def _make_finish(self, reason: FinishReason, text: str = "", error: str | None = None):
-        return FinishEvent(reason, len(self.prompt_ids), self.completion_tokens, text, error)
+            self._push(FinishEvent(FinishReason.TIMEOUT, len(self.prompt_ids)))
+            self._wake()
 
     def _push(self, ev: Event) -> None:
         if self.finish is not None:
@@ -171,48 +201,124 @@ class RequestHandle:
             ev.completion_tokens = self.completion_tokens
             ev.timings = self.timings.to_dict(self.completion_tokens)
             self.finish = ev
-            self.state = "finished"
             self._on_finish(self)
+            self.state = "finished"
         self._events.put_nowait(ev)
 
 
 class Engine:
-    def __init__(self, backend: Backend, max_pending: int) -> None:
+    def __init__(
+        self, backend: Backend, config: EngineConfig | None = None, metrics: Any = None
+    ) -> None:
         self.backend = backend
-        self.max_pending = max_pending
-        self._queue: asyncio.Queue[RequestHandle] = asyncio.Queue()
-        self._active: dict[str, RequestHandle] = {}  # queued + running
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="miniserve-gen")
-        self._task: asyncio.Task | None = None
+        self.config = cfg = config or EngineConfig()
+        self.metrics = metrics
+        prefix = cfg.enable_prefix_caching and backend.supports_prefix_caching
+        self.block_manager = BlockManager(backend.num_kv_blocks, backend.block_size, prefix)
+        self.scheduler = Scheduler(
+            SchedulerConfig(
+                max_num_seqs=cfg.max_num_seqs,
+                max_num_batched_tokens=cfg.max_num_batched_tokens,
+                enable_chunked_prefill=cfg.enable_chunked_prefill,
+                watermark_blocks=int(cfg.watermark * backend.num_kv_blocks),
+            ),
+            self.block_manager,
+            make_policy(cfg.policy),
+            on_release=backend.release,
+        )
+        # worker side
+        self._inbox: list[Sequence] = []
+        self._inbox_lock = threading.Lock()
+        self._wake_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stopping = False
+        self.num_steps = 0
+        self.fatal_error: str | None = None
+        # loop side
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._closing = False
-        self.current: RequestHandle | None = None
+        self._active: dict[str, RequestHandle] = {}
+        self._queued: set[str] = set()
+        self._tenant_queued: Counter[str] = Counter()
+        self._queued_tokens = 0
 
-    # ---- lifecycle ----
+    # ------------------------------------------------------------------ capacity / validation
+    @property
+    def capacity_tokens(self) -> int:
+        return self.block_manager.capacity_tokens
+
+    def check_request_fits(self, prompt_tokens: int, max_tokens: int) -> str | None:
+        """Reasons a request can never be served by this engine configuration, else None."""
+        total = prompt_tokens + max_tokens
+        if total > self.capacity_tokens:
+            return (
+                f"prompt ({prompt_tokens}) + max_tokens ({max_tokens}) exceeds the KV cache "
+                f"capacity ({self.capacity_tokens} tokens)"
+            )
+        if not self.config.enable_chunked_prefill and total > self.config.max_num_batched_tokens:
+            # a preempted sequence is recomputed in one step without chunking
+            return (
+                f"prompt + max_tokens ({total}) exceeds max_num_batched_tokens "
+                f"({self.config.max_num_batched_tokens}) with chunked prefill disabled"
+            )
+        return None
+
+    # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
-        self._task = asyncio.create_task(self._run(), name="miniserve-engine")
+        self._loop = asyncio.get_running_loop()
+        self._thread = threading.Thread(
+            target=self._worker_main, name="miniserve-engine", daemon=True
+        )
+        self._thread.start()
 
     async def stop(self) -> None:
-        """Cancel everything, wait for the worker to leave the model, release the thread."""
+        """Cancel everything, wait for the worker to leave the model, end the thread."""
         self._closing = True
         for handle in list(self._active.values()):
             handle.cancel()
-        if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-        await asyncio.to_thread(self._executor.shutdown, wait=True)
+        self._stopping = True
+        self._wake_event.set()
+        if self._thread is not None:
+            await asyncio.to_thread(self._thread.join, 60)
 
-    # ---- request API ----
+    # ------------------------------------------------------------------ request API (loop)
     def submit(
-        self, prompt_ids: list[int], params: SamplingParams, timeout_s: float
+        self,
+        prompt_ids: list[int],
+        params: SamplingParams,
+        timeout_s: float,
+        tenant: str = "default",
     ) -> RequestHandle:
         if self._closing:
             raise EngineClosed("engine is shutting down")
-        if len(self._active) >= self.max_pending + 1:  # +1: the running slot
-            raise EngineOverloaded(f"{len(self._active)} requests in flight")
-        handle = RequestHandle(prompt_ids, params, timeout_s, on_finish=self._on_finish)
+        cfg = self.config
+        # In flight = running batch slots + bounded wait queue. Counting in-flight (rather than
+        # "not yet started") means max_waiting=0 still accepts work while batch slots are free.
+        if len(self._active) >= cfg.max_num_seqs + cfg.max_waiting:
+            raise EngineOverloaded(f"server queue full ({len(self._queued)} waiting)")
+        if self._tenant_queued[tenant] >= cfg.max_waiting_per_tenant:
+            raise EngineOverloaded(f"too many queued requests for tenant {tenant!r}", True)
+        if self._queued_tokens + len(prompt_ids) > cfg.max_queued_tokens:
+            raise EngineOverloaded("queued prompt-token budget exhausted")
+        handle = RequestHandle(
+            prompt_ids, params, timeout_s, tenant, self._on_finish, self._wake_event.set
+        )
+        seq = Sequence(
+            handle.id,
+            prompt_ids,
+            params,
+            tenant,
+            handle.timings.arrival,
+            handle.deadline,
+            handle=handle,
+        )
         self._active[handle.id] = handle
-        self._queue.put_nowait(handle)
+        self._queued.add(handle.id)
+        self._tenant_queued[tenant] += 1
+        self._queued_tokens += len(prompt_ids)
+        with self._inbox_lock:
+            self._inbox.append(seq)
+        self._wake_event.set()
         return handle
 
     def get(self, request_id: str) -> RequestHandle | None:
@@ -222,83 +328,190 @@ class Engine:
     def num_active(self) -> int:
         return len(self._active)
 
+    @property
+    def num_queued(self) -> int:
+        return len(self._queued)
+
+    def _unqueue(self, handle: RequestHandle) -> None:
+        if handle.id in self._queued:
+            self._queued.discard(handle.id)
+            self._tenant_queued[handle.tenant] -= 1
+            if not self._tenant_queued[handle.tenant]:
+                del self._tenant_queued[handle.tenant]
+            self._queued_tokens -= len(handle.prompt_ids)
+
     def _on_finish(self, handle: RequestHandle) -> None:
         self._active.pop(handle.id, None)
+        self._unqueue(handle)
         f = handle.finish
+        if self.metrics is not None:
+            self.metrics.observe_request(handle)
         log.info(
-            "request finished id=%s reason=%s prompt_tokens=%d completion_tokens=%d timings=%s%s",
-            handle.id,
-            f.reason,
-            f.prompt_tokens,
-            f.completion_tokens,
-            f.timings,
-            f" error={f.error}" if f.error else "",
+            "request finished",
+            extra={
+                "request_id": handle.id,
+                "tenant": handle.tenant,
+                "reason": str(f.reason),
+                "prompt_tokens": f.prompt_tokens,
+                "completion_tokens": f.completion_tokens,
+                "cached_tokens": f.cached_tokens,
+                "preemptions": f.preemptions,
+                **{k: v for k, v in f.timings.items()},
+                **({"error": f.error} if f.error else {}),
+            },
         )
 
-    # ---- scheduling loop ----
-    async def _run(self) -> None:
-        loop = asyncio.get_running_loop()
-        while True:
-            handle = await self._queue.get()
-            if handle.finish is not None:  # cancelled while queued
-                continue
-            if time.monotonic() >= handle.deadline:
-                handle._expire()
-                continue
-            handle.state = "running"
-            handle.timings.started = time.monotonic()
-            self.current = handle
+    def _deliver(self, events: list[tuple[RequestHandle, Any]]) -> None:
+        for handle, ev in events:
+            if isinstance(ev, _Started):
+                if handle.finish is None and handle.state == "queued":
+                    handle.state = "running"
+                    handle.timings.started = ev.t
+                    self._unqueue(handle)
+            else:
+                handle._push(ev)
+
+    # ------------------------------------------------------------------ worker thread
+    def _worker_main(self) -> None:
+        while not self._stopping:
+            self._wake_event.clear()
+            events: list[tuple[RequestHandle, Any]] = []
             try:
-                await loop.run_in_executor(self._executor, self._generate, handle, loop)
-            finally:
-                self.current = None
+                self._drain_inbox(events)
+                self._reap(events)
+                if self.scheduler.has_work():
+                    out = self.scheduler.schedule()
+                    if out:
+                        self._run_step(out, events)
+                    else:
+                        self._wake_event.wait(0.002)
+                else:
+                    self._wake_event.wait(0.25)
+            except Exception as e:  # a bug in the loop must not strand every request
+                log.exception("engine step failed; failing running requests")
+                self.fatal_error = f"{type(e).__name__}: {e}"
+                for seq in list(self.scheduler.running):
+                    self._finish(seq, FinishReason.ERROR, events, error=self.fatal_error)
+            if events:
+                self._post(events)
+        # shutdown: release whatever is left (handles were already cancelled by stop())
+        events = []
+        self._drain_inbox(events)
+        for seq in list(self.scheduler.running) + list(self.scheduler.waiting):
+            self._finish(seq, FinishReason.CANCELLED, events)
+        if events:
+            self._post(events)
 
-    def _generate(self, h: RequestHandle, loop: asyncio.AbstractEventLoop) -> None:
-        """Worker thread: drive the backend iterator for one request."""
-
-        def push(ev: Event) -> None:
-            loop.call_soon_threadsafe(h._push, ev)
-
-        def interrupted() -> FinishReason | None:
-            if h._cancel_flag.is_set():
-                return h._cancel_reason
-            if time.monotonic() >= h.deadline:
-                return FinishReason.TIMEOUT
-            return None
-
-        tokenizer = self.backend.tokenizer
-        detok = IncrementalDetokenizer(tokenizer)
-        n = 0
-        reason, error, tail = FinishReason.ERROR, None, ""
-        it = self.backend.generate(h.prompt_ids, h.params)
+    def _post(self, events: list[tuple[RequestHandle, Any]]) -> None:
         try:
-            while True:
-                # Before each forward pass: a stopped request costs no extra compute.
-                if (stop := interrupted()) is not None:
-                    reason = stop
-                    break
-                try:
-                    tok = next(it)
-                except StopIteration:
+            self._loop.call_soon_threadsafe(self._deliver, events)
+        except RuntimeError:  # loop already closed during interpreter shutdown
+            pass
+
+    def _drain_inbox(self, events) -> None:
+        with self._inbox_lock:
+            new, self._inbox = self._inbox, []
+        tokenizer = self.backend.tokenizer
+        for seq in new:
+            seq.detok = IncrementalDetokenizer(tokenizer)
+            seq.stopper = StopChecker(seq.params.stop) if seq.params.stop else None
+            self.scheduler.add(seq)
+
+    def _interrupted(self, seq: Sequence, now: float) -> FinishReason | None:
+        h = seq.handle
+        if h is not None and h._cancel_flag.is_set():
+            return h._cancel_reason
+        if now >= seq.deadline:
+            return FinishReason.TIMEOUT
+        return None
+
+    def _reap(self, events) -> None:
+        now = time.monotonic()
+        for seq in list(self.scheduler.running) + list(self.scheduler.waiting):
+            reason = self._interrupted(seq, now)
+            if reason is not None:
+                self._finish(seq, reason, events)
+
+    def _run_step(self, out: SchedulerOutput, events) -> None:
+        now = time.monotonic()
+        started = []
+        for seq in out.admitted:
+            if seq.first_scheduled is None:
+                seq.first_scheduled = now
+                started.append((seq.handle, _Started(now)))
+        if started:
+            # Post *before* the (possibly long) step, so the loop sees "running" immediately —
+            # otherwise a cancel during the first prefill would be treated as a queued cancel.
+            events.extend(started)
+            self._post(list(events))
+            events.clear()
+        t0 = time.perf_counter()
+        try:
+            tokens = self.backend.execute(out.scheduled)
+        except Exception as e:
+            log.exception("backend step failed")
+            err = f"{type(e).__name__}: {e}"
+            for s in out.scheduled:
+                if s.seq.status != SeqStatus.FINISHED:
+                    self._finish(s.seq, FinishReason.ERROR, events, error=err)
+            return
+        step_s = time.perf_counter() - t0
+        self.num_steps += 1
+        self.scheduler.complete_step(out)
+        now = time.monotonic()
+        eos = self.backend.tokenizer.eos_token_ids
+        for s, tok in zip(out.scheduled, tokens, strict=True):
+            seq = s.seq
+            if tok is None or seq.status == SeqStatus.FINISHED:
+                continue
+            reason = self._interrupted(seq, now)
+            if reason is not None:  # computed after cancel/deadline: discard the token
+                self._finish(seq, reason, events)
+                continue
+            if tok in eos and not seq.params.ignore_eos:
+                self._finish(seq, FinishReason.STOP, events)
+                continue
+            seq.token_ids.append(tok)
+            text = seq.detok.add(tok)
+            stopped = False
+            if seq.stopper is not None:
+                text, stopped = seq.stopper.process(text)
+            events.append((seq.handle, TokenEvent(seq.num_output_tokens - 1, tok, text, now)))
+            if stopped:
+                self._finish(seq, FinishReason.STOP, events, flush=False)
+            elif seq.num_output_tokens >= seq.params.max_tokens:
+                self._finish(seq, FinishReason.LENGTH, events)
+        if self.metrics is not None:
+            self.metrics.observe_step(self, out, step_s)
+
+    def _finish(
+        self,
+        seq: Sequence,
+        reason: FinishReason,
+        events,
+        error: str | None = None,
+        flush: bool = True,
+    ) -> None:
+        tail = ""
+        if flush and reason != FinishReason.ERROR and seq.detok is not None:
+            tail = seq.detok.flush()
+            if seq.stopper is not None:
+                tail, stopped = seq.stopper.process(tail)
+                if stopped:
                     reason = FinishReason.STOP
-                    break
-                # After it: a step that finished after cancel/deadline is discarded, so the
-                # client-visible result is "cancelled"/"timeout", never a late token or EOS.
-                if (stop := interrupted()) is not None:
-                    reason = stop
-                    break
-                if tok in tokenizer.eos_token_ids:
-                    reason = FinishReason.STOP
-                    break
-                push(TokenEvent(n, tok, detok.add(tok), time.monotonic()))
-                n += 1
-                if n >= h.params.max_tokens:
-                    reason = FinishReason.LENGTH
-                    break
-            tail = detok.flush()
-        except Exception as e:  # backend failure must not kill the engine loop
-            log.exception("generation failed id=%s", h.id)
-            reason, error = FinishReason.ERROR, f"{type(e).__name__}: {e}"
-        finally:
-            it.close()
-        push(h._make_finish(reason, text=tail, error=error))
+                else:
+                    tail += seq.stopper.flush()
+        self.scheduler.finish(seq)
+        events.append(
+            (
+                seq.handle,
+                FinishEvent(
+                    reason,
+                    seq.num_prompt_tokens,
+                    text=tail,
+                    error=error,
+                    cached_tokens=seq.num_cached_tokens,
+                    preemptions=seq.num_preemptions,
+                ),
+            )
+        )

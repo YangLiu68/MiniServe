@@ -39,20 +39,41 @@ def make_settings(**overrides) -> Settings:
 
 
 class RecordingBackend:
-    """Wraps a backend and counts tokens it actually produced (i.e. forward passes spent)."""
+    """Wraps a backend; records what actually reached the model (tokens produced, requests,
+    batch sizes) so tests can assert on wasted compute, not just on responses."""
 
     def __init__(self, inner) -> None:
         self.inner = inner
-        self.name, self.model_id, self.device = inner.name, inner.model_id, inner.device
-        self.max_context, self.tokenizer = inner.max_context, inner.tokenizer
-        self.yielded = 0
-        self.calls: list[list[int]] = []
+        for attr in (
+            "name",
+            "model_id",
+            "device",
+            "dtype",
+            "max_context",
+            "tokenizer",
+            "block_size",
+            "num_kv_blocks",
+            "supports_prefix_caching",
+        ):
+            setattr(self, attr, getattr(inner, attr))
+        self.produced = 0  # sampled tokens
+        self.steps = 0
+        self.max_batch = 0
+        self.seen: set[str] = set()  # request ids that reached the model
 
-    def generate(self, prompt_ids: list[int], params: SamplingParams):
-        self.calls.append(prompt_ids)
-        for tok in self.inner.generate(prompt_ids, params):
-            self.yielded += 1
-            yield tok
+    def execute(self, batch):
+        self.steps += 1
+        self.max_batch = max(self.max_batch, len(batch))
+        self.seen.update(s.seq.request_id for s in batch)
+        out = self.inner.execute(batch)
+        self.produced += sum(t is not None for t in out)
+        return out
+
+    def release(self, seq, preempted=False):
+        self.inner.release(seq, preempted)
+
+    def memory_stats(self):
+        return self.inner.memory_stats()
 
     def close(self) -> None:
         self.inner.close()
@@ -117,3 +138,52 @@ def live_server(backend=None, **settings) -> Iterator[tuple[str, object]]:
         server.should_exit = True
         thread.join(timeout=10)
         sock.close()
+
+
+def run_sync(
+    backend,
+    prompts,
+    max_tokens=8,
+    num_blocks=None,
+    prefix=True,
+    policy=None,
+    temperature=0.0,
+    seed=None,
+    **sched_cfg,
+):
+    """Drive scheduler + backend synchronously (no threads/asyncio); returns (seqs, scheduler)."""
+    from miniserve.block_manager import BlockManager
+    from miniserve.policy import FCFSPolicy
+    from miniserve.scheduler import Scheduler, SchedulerConfig
+    from miniserve.sequence import Sequence
+
+    bm = BlockManager(
+        num_blocks or backend.num_kv_blocks,
+        backend.block_size,
+        prefix and backend.supports_prefix_caching,
+    )
+    sched = Scheduler(
+        SchedulerConfig(**sched_cfg),
+        bm,
+        policy if policy is not None else FCFSPolicy(),
+        on_release=backend.release,
+    )
+    seqs = []
+    for i, p in enumerate(prompts):
+        params = SamplingParams(max_tokens, temperature=temperature, seed=seed, ignore_eos=True)
+        seqs.append(Sequence(f"s{i}", list(p), params, "t", float(i), 1e18))
+        sched.add(seqs[-1])
+    steps = 0
+    while sched.has_work():
+        out = sched.schedule()
+        toks = backend.execute(out.scheduled)
+        sched.complete_step(out)
+        for s, t in zip(out.scheduled, toks, strict=True):
+            if t is not None:
+                s.seq.token_ids.append(t)
+                if s.seq.num_output_tokens >= max_tokens:
+                    sched.finish(s.seq)
+        steps += 1
+        assert steps < 100_000
+        bm.check_invariants(sched.running)
+    return seqs, sched

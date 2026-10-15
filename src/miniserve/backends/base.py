@@ -1,15 +1,19 @@
-"""Backend interface shared by the toy backend and the PyTorch/Transformers backend.
+"""Backend interface: tokenizer + a model that runs one *batched step* at a time.
 
-A backend owns the tokenizer and the model and exposes generation as a *synchronous* token
-iterator. The engine drives that iterator from a dedicated worker thread and checks for
-cancellation / deadlines between tokens, so a backend never needs to know about asyncio.
+The engine's scheduler decides which tokens of which sequences run in each step
+(``ScheduledSeq``: a contiguous span ``token_ids[start:start+num_tokens]``, which may be a whole
+prompt, a prefill chunk, a recompute after preemption, or a single decode token). The backend
+runs that span against the sequence's KV cache and, for spans that reach the end of the
+sequence, samples the next token. Backends never decide *what* to run.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from miniserve.sequence import ScheduledSeq, Sequence
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,8 @@ class SamplingParams:
     temperature: float = 1.0
     top_p: float = 1.0
     seed: int | None = None
+    ignore_eos: bool = False
+    stop: tuple[str, ...] = ()
 
 
 class Tokenizer(Protocol):
@@ -29,23 +35,29 @@ class Tokenizer(Protocol):
         """Decode ids to text, skipping special tokens."""
         ...
 
+    def apply_chat_template(self, messages: list[dict[str, str]]) -> list[int]: ...
+
 
 class Backend(Protocol):
     name: str
     model_id: str
     device: str
+    dtype: str | None
     max_context: int
     tokenizer: Tokenizer
+    block_size: int
+    num_kv_blocks: int
+    supports_prefix_caching: bool
 
-    def generate(self, prompt_ids: list[int], params: SamplingParams) -> Iterator[int]:
-        """Yield sampled token ids one at a time (EOS included, if sampled).
-
-        The iterator is lazy: the next forward pass runs only when the caller asks for the next
-        token, so a caller that stops iterating stops spending compute. It must not stop on its own
-        at ``max_tokens``; the engine enforces limits.
-        """
+    def execute(self, batch: list[ScheduledSeq]) -> list[int | None]:
+        """Run one step; return the sampled token for each entry whose span reaches the end of
+        its sequence (``ScheduledSeq.sample``), else ``None``."""
         ...
 
-    def close(self) -> None:
-        """Release model memory."""
+    def release(self, seq: Sequence, preempted: bool = False) -> None:
+        """Drop per-sequence state (finished, cancelled or preempted)."""
         ...
+
+    def memory_stats(self) -> dict[str, float]: ...
+
+    def close(self) -> None: ...

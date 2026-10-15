@@ -1,23 +1,22 @@
-"""PyTorch + Transformers backend.
+"""Generic PyTorch + Transformers backend (the *integration* baseline).
 
-Generation is a hand-written prefill + decode loop (not ``model.generate``) so the engine can
-stop between any two tokens. The KV cache is Transformers' own ``DynamicCache``, passed back in
-via ``past_key_values`` — that is *integration* with the library cache, not an original cache
-implementation. Sampling (greedy / temperature / top-p, per-request seeded ``torch.Generator``)
-runs on CPU over the last-position logits, so results with a fixed seed do not depend on device
-RNG behaviour (they can still differ across devices/dtypes through the logits themselves).
+Works with any ``AutoModelForCausalLM``. Each sequence keeps its own Transformers
+``DynamicCache`` — this is integration with the library's KV cache, **not** an original cache
+implementation (that is ``backends/native.py`` + ``block_manager.py``). A step runs each
+scheduled sequence's span as a separate forward call, so the engine's continuous scheduling
+still interleaves requests token by token, but there are no batched GEMMs and no prefix sharing.
+It is the reference that the native backend is measured against at matched model/hardware.
 """
 
 from __future__ import annotations
 
 import gc
-import inspect
 import logging
-from collections.abc import Iterator
 
 import torch
 
-from miniserve.backends.base import SamplingParams
+from miniserve.sampling import Sampler
+from miniserve.sequence import ScheduledSeq, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -42,20 +41,6 @@ def resolve_dtype(dtype: str, device: str) -> torch.dtype:
     return torch.float32
 
 
-def sample_next(logits: torch.Tensor, params: SamplingParams, generator: torch.Generator) -> int:
-    """Pick the next token from 1-D float32 CPU logits."""
-    if params.temperature == 0:
-        return int(torch.argmax(logits))
-    probs = torch.softmax(logits / params.temperature, dim=-1)
-    if params.top_p < 1.0:
-        sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-        mass_before = torch.cumsum(sorted_probs, dim=-1) - sorted_probs
-        sorted_probs[mass_before > params.top_p] = 0.0  # always keeps the top token
-        choice = torch.multinomial(sorted_probs, 1, generator=generator)
-        return int(sorted_idx[choice])
-    return int(torch.multinomial(probs, 1, generator=generator))
-
-
 class HFTokenizer:
     """Thin wrapper giving a Transformers tokenizer the backend ``Tokenizer`` interface."""
 
@@ -70,87 +55,106 @@ class HFTokenizer:
     def decode(self, ids: list[int]) -> str:
         return self._tok.decode(ids, skip_special_tokens=True)
 
+    def apply_chat_template(self, messages: list[dict[str, str]]) -> list[int]:
+        if not getattr(self._tok, "chat_template", None):
+            raise ValueError("this model's tokenizer has no chat template")
+        text = self._tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        return list(self._tok(text, add_special_tokens=False)["input_ids"])
+
+
+def load_hf_model(model_id: str, revision: str | None, device: str, dtype: torch.dtype):
+    """Load model + tokenizer; returns (model on device in eval mode, HFTokenizer)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    log.info("loading %s@%s on %s (%s)", model_id, revision or "main", device, dtype)
+    tok = AutoTokenizer.from_pretrained(model_id, revision=revision)
+    model = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=dtype)
+    model.to(device).eval()
+    gen_eos = model.generation_config.eos_token_id
+    gen_eos = gen_eos if isinstance(gen_eos, list) else [gen_eos] if gen_eos is not None else []
+    return model, HFTokenizer(tok, frozenset(gen_eos))
+
+
+def _kv_bytes_per_token(config, dtype: torch.dtype) -> int:
+    heads = config.num_attention_heads
+    kv_heads = getattr(config, "num_key_value_heads", None) or heads
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // heads
+    elem = torch.empty((), dtype=dtype).element_size()
+    return 2 * config.num_hidden_layers * kv_heads * head_dim * elem
+
 
 class HFBackend:
     name = "hf"
+    supports_prefix_caching = False
 
-    def __init__(self, model, tokenizer, model_id: str, device: str) -> None:
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        model_id: str,
+        kv_cache_mb: float = 256.0,
+        block_size: int = 16,
+        max_context: int | None = None,
+    ) -> None:
         self.model = model.eval()
         self.tokenizer = tokenizer
         self.model_id = model_id
-        self.device = device
-        self.dtype = str(next(model.parameters()).dtype).removeprefix("torch.")
-        self.max_context = int(getattr(model.config, "max_position_embeddings", 2048))
-        # Prefill only needs the last position's logits; avoids a [prompt_len, vocab] tensor.
-        self._logits_kw = (
-            {"logits_to_keep": 1}
-            if "logits_to_keep" in inspect.signature(model.forward).parameters
-            else {}
-        )
+        p = next(model.parameters())
+        self.device = p.device.type
+        self.dtype = str(p.dtype).removeprefix("torch.")
+        cfg_ctx = int(getattr(model.config, "max_position_embeddings", 2048))
+        self.max_context = min(cfg_ctx, max_context or cfg_ctx)
+        self.block_size = block_size
+        # DynamicCache memory is not paged; the block budget is an accounting device so the
+        # scheduler's admission/preemption logic applies identically to both backends.
+        per_token = _kv_bytes_per_token(model.config, p.dtype)
+        self.num_kv_blocks = max(1, int(kv_cache_mb * 2**20) // (per_token * block_size))
+        self._caches: dict[str, object] = {}
+        self.sampler = Sampler()
 
     @classmethod
     def from_pretrained(
-        cls, model_id: str, revision: str | None, device: str = "auto", dtype: str = "auto"
+        cls,
+        model_id,
+        revision,
+        device="auto",
+        dtype="auto",
+        kv_cache_mb=256.0,
+        block_size=16,
+        max_context=None,
     ) -> HFBackend:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
         dev = resolve_device(device)
-        torch_dtype = resolve_dtype(dtype, dev)
-        log.info("loading %s@%s on %s (%s)", model_id, revision or "main", dev, torch_dtype)
-        tok = AutoTokenizer.from_pretrained(model_id, revision=revision)
-        model = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, dtype=torch_dtype)
-        model.to(dev)
-        gen_eos = model.generation_config.eos_token_id
-        gen_eos = gen_eos if isinstance(gen_eos, list) else [gen_eos] if gen_eos is not None else []
-        return cls(model, HFTokenizer(tok, frozenset(gen_eos)), model_id, dev)
+        model, tok = load_hf_model(model_id, revision, dev, resolve_dtype(dtype, dev))
+        return cls(model, tok, model_id, kv_cache_mb, block_size, max_context)
 
     @torch.inference_mode()
-    def generate(self, prompt_ids: list[int], params: SamplingParams) -> Iterator[int]:
-        gen = torch.Generator(device="cpu")
-        if params.seed is not None:
-            gen.manual_seed(params.seed)
-        else:
-            gen.seed()
-        input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
-        out = self.model(input_ids=input_ids, use_cache=True, **self._logits_kw)
-        while True:
-            tok = sample_next(out.logits[0, -1].float().cpu(), params, gen)
-            yield tok
-            out = self.model(
-                input_ids=torch.tensor([[tok]], dtype=torch.long, device=self.device),
-                past_key_values=out.past_key_values,
-                use_cache=True,
-                **self._logits_kw,
-            )
+    def execute(self, batch: list[ScheduledSeq]) -> list[int | None]:
+        rows, sampling = [], []
+        for s in batch:
+            rid = s.seq.request_id
+            cache = self._caches.get(rid) if s.start > 0 else None
+            ids = torch.tensor([s.token_ids], dtype=torch.long, device=self.device)
+            out = self.model(input_ids=ids, past_key_values=cache, use_cache=True, logits_to_keep=1)
+            self._caches[rid] = out.past_key_values
+            if s.sample:
+                rows.append(out.logits[0, -1])
+                sampling.append(s.seq)
+        tokens = iter(self.sampler.sample(torch.stack(rows), sampling) if rows else [])
+        return [next(tokens) if s.sample else None for s in batch]
+
+    def release(self, seq: Sequence, preempted: bool = False) -> None:
+        self._caches.pop(seq.request_id, None)
+        self.sampler.release(seq, preempted)
+
+    def memory_stats(self) -> dict[str, float]:
+        from miniserve.backends.native import device_memory
+
+        return device_memory(self.device)
 
     def close(self) -> None:
+        from miniserve.backends.native import empty_device_cache
+
         self.model = None
+        self._caches.clear()
         gc.collect()
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
-        elif self.device == "mps":
-            torch.mps.empty_cache()
-
-
-def build_tiny_random(device: str = "cpu", seed: int = 0) -> HFBackend:
-    """A 2-layer randomly initialised GPT-2 over the byte tokenizer — no download needed.
-
-    Its outputs are gibberish, but it runs the real PyTorch/Transformers code path (prefill,
-    DynamicCache decode, sampling), which is what the tests need.
-    """
-    from transformers import GPT2Config, GPT2LMHeadModel
-
-    from miniserve.backends.toy import ByteTokenizer
-
-    torch.manual_seed(seed)
-    cfg = GPT2Config(
-        vocab_size=ByteTokenizer.vocab_size,
-        n_positions=1024,
-        n_embd=64,
-        n_layer=2,
-        n_head=2,
-        bos_token_id=ByteTokenizer.EOS,
-        eos_token_id=ByteTokenizer.EOS,
-    )
-    model = GPT2LMHeadModel(cfg).to(device)
-    return HFBackend(model, ByteTokenizer(), model_id="tiny-random-gpt2", device=device)
+        empty_device_cache(self.device)

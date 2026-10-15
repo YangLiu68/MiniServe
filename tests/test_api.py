@@ -25,7 +25,13 @@ def test_non_stream_completion_shape(toy_client):
         "finish_reason": "stop",
         "logprobs": None,
     }
-    assert body["usage"] == {"prompt_tokens": 11, "completion_tokens": 11, "total_tokens": 22}
+    usage = body["usage"]
+    assert (usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"]) == (
+        11,
+        11,
+        22,
+    )
+    assert usage["prompt_tokens_details"] == {"cached_tokens": 0}
     assert set(body["miniserve"]["timings"]) == {
         "queue_ms",
         "ttft_ms",
@@ -58,7 +64,13 @@ def test_stream_matches_non_stream(toy_client, prompt):
     assert all(c["id"] == r.headers["x-request-id"] for c in chunks)
     assert all(c["choices"][0]["finish_reason"] is None for c in chunks[:-1])
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
-    assert chunks[-1]["usage"] == full["usage"]
+    su, fu = chunks[-1]["usage"], full["usage"]
+    assert (su["prompt_tokens"], su["completion_tokens"]) == (
+        fu["prompt_tokens"],
+        fu["completion_tokens"],
+    )
+    # the second identical prompt is served from the prefix cache (full 16-token blocks)
+    assert su["prompt_tokens_details"]["cached_tokens"] == (fu["prompt_tokens"] - 1) // 16 * 16
     assert "".join(c["choices"][0]["text"] for c in chunks) == full["choices"][0]["text"]
     assert all("�" not in c["choices"][0]["text"] for c in chunks)
 
@@ -76,6 +88,9 @@ def test_stream_matches_non_stream(toy_client, prompt):
         {"prompt": "hi", "timeout_s": 0},
         {"prompt": "hi", "n": 2},  # unsupported OpenAI field -> rejected, not silently ignored
         {"prompt": ["batched", "prompts"]},
+        {"prompt": "hi", "stop": ["a", "b", "c", "d", "e"]},
+        {"prompt": "hi", "stop": ""},
+        {"prompt": "hi", "stop": ["x" * 65]},
     ],
 )
 def test_validation_errors(toy_client, body):
@@ -126,7 +141,7 @@ def test_rate_limit_returns_429_with_retry_after():
 
 
 def test_not_ready_while_loading_then_ready():
-    # warmup runs the slow toy prefill (13 bytes x 40 ms ~ 0.5 s) before the engine starts
+    # warmup runs two short requests through the engine with a slow toy prefill (~2 s)
     from fastapi.testclient import TestClient
 
     from miniserve.server import create_app
@@ -152,9 +167,8 @@ def test_failed_load_is_reported():
     from miniserve.server import create_app
 
     class Broken(ToyBackend):
-        def generate(self, prompt_ids, params):
+        def execute(self, batch):
             raise RuntimeError("weights corrupted")
-            yield  # pragma: no cover
 
     with TestClient(create_app(make_settings(warmup=True), Broken())) as c:
         deadline = time.monotonic() + 5
@@ -216,3 +230,103 @@ def test_injected_backend_survives_app_shutdown():
         with app_client(backend) as c:
             assert complete(c, prompt="hi").status_code == 200
     assert not backend.closed
+
+
+def test_chat_completion_non_stream_and_stream(toy_client):
+    msgs = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "hi 🙂"}]
+    r = toy_client.post("/v1/chat/completions", json={"messages": msgs, "max_tokens": 200})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["object"] == "chat.completion"
+    msg = body["choices"][0]["message"]
+    # toy template + echo: the "model" repeats the rendered conversation
+    assert msg == {"role": "assistant", "content": "system: be brief\nuser: hi 🙂\nassistant: "}
+    r = toy_client.post(
+        "/v1/chat/completions", json={"messages": msgs, "max_tokens": 200, "stream": True}
+    )
+    chunks, done = parse_sse(r.text)
+    assert done and chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    assert all(c["object"] == "chat.completion.chunk" for c in chunks)
+    streamed = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+    assert streamed == msg["content"]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_chat_validation(toy_client):
+    bad = [
+        {"messages": []},
+        {"messages": [{"role": "tool", "content": "x"}]},
+        {"messages": [{"role": "user"}]},
+    ]
+    for body in bad:
+        assert toy_client.post("/v1/chat/completions", json=body).status_code == 422
+
+
+def test_max_completion_tokens_alias(toy_client):
+    r = toy_client.post(
+        "/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "abcdef"}], "max_completion_tokens": 3},
+    )
+    assert r.json()["usage"]["completion_tokens"] == 3
+
+
+def test_stop_and_ignore_eos_over_http(toy_client):
+    body = complete(toy_client, prompt="alpha beta gamma", stop=[" gam"], max_tokens=100).json()
+    assert body["choices"][0]["text"] == "alpha beta"
+    assert body["choices"][0]["finish_reason"] == "stop"
+    body = complete(toy_client, prompt="ab", max_tokens=6, ignore_eos=True).json()
+    assert body["usage"]["completion_tokens"] == 6
+    assert body["choices"][0]["finish_reason"] == "length"
+
+
+def test_multi_tenant_keys_and_per_tenant_rate_limit():
+    with app_client(
+        ToyBackend(), api_keys="alice:ka,bob:kb", rate_limit_rpm=60, rate_limit_burst=1
+    ) as c:
+        alice = {"Authorization": "Bearer ka"}
+        bob = {"Authorization": "Bearer kb"}
+        assert c.post("/v1/completions", json={"prompt": "a"}, headers=alice).status_code == 200
+        assert c.post("/v1/completions", json={"prompt": "a"}, headers=alice).status_code == 429
+        # bob has his own bucket
+        assert c.post("/v1/completions", json={"prompt": "b"}, headers=bob).status_code == 200
+        assert (
+            c.post(
+                "/v1/completions", json={"prompt": "b"}, headers={"Authorization": "Bearer kc"}
+            ).status_code
+            == 401
+        )
+
+
+def test_metrics_endpoint_reports_requests_and_engine_state(toy_client):
+    complete(toy_client, prompt="metrics please", max_tokens=5)
+    complete(toy_client, prompt="x", max_tokens=99999)  # rejected: over the cap
+    text = toy_client.get("/metrics").text
+    assert 'miniserve_requests_total{finish_reason="length"} 1.0' in text
+    assert "miniserve_time_to_first_token_seconds_count 1.0" in text
+    assert 'miniserve_requests_rejected_total{reason="too_long"} 1.0' in text
+    assert "miniserve_kv_cache_usage_ratio" in text
+    assert "miniserve_generation_tokens_total 5.0" in text
+    assert "miniserve_process_resident_memory_bytes" in text
+
+
+def test_engine_debug_endpoint(toy_client):
+    complete(toy_client, prompt="debug", max_tokens=2)
+    info = toy_client.get("/v1/engine").json()
+    assert info["kv_cache"]["blocks_total"] == 8192
+    assert info["steps"] >= 2 and info["running"] == 0
+    assert info["config"]["policy"] == "fcfs"
+
+
+def test_draining_fails_readiness_and_refuses_new_work(toy_client):
+    toy_client.app.state.miniserve.begin_drain()
+    r = toy_client.get("/readyz")
+    assert r.status_code == 503 and r.json()["status"] == "draining"
+    assert toy_client.get("/healthz").status_code == 200  # still alive
+    assert complete(toy_client, prompt="hi").status_code == 503
+
+
+def test_request_larger_than_kv_cache_is_400():
+    with app_client(ToyBackend(num_kv_blocks=2, block_size=8)) as c:
+        r = complete(c, prompt="x" * 10, max_tokens=7)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "exceeds_kv_capacity"
+        assert complete(c, prompt="x" * 10, max_tokens=6).status_code == 200
