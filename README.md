@@ -32,7 +32,13 @@ recorded with every run); medians of 2 rounds with rotated order. Full tables, s
 | Question | Answer (measured) |
 |---|---|
 | Does continuous batching pay off? | At 16 concurrent clients: **197 vs 29 output tok/s** (6.8× the Transformers one-at-a-time baseline), median TTFT **0.46 s vs 32 s**; per-token latency rises from ~35 to ~73 ms |
-| Is our forward pass slower than Transformers for one stream? | Roughly at parity: 36–38 ms vs 35 ms per token at concurrency 1 |
+| Short requests stuck behind long generations? | chat TTFT p50 **13.5 s (FIFO) → 87 ms** (continuous batching) |
+| Long prompts stalling streams that are already running? | chunked prefill: chat inter-token p95 **663 → 163 ms**, at +29% TTFT for the long prompts themselves |
+| Shared 1,024-token system prompt (prefix caching)? | TTFT p50 **671 → 75 ms**, 3× throughput, 94% of prompt tokens served from cache |
+| One tenant flooding the server? | fair (VTC) scheduling: the light tenant's TTFT p50 **4.6 → 2.1 s**, its completions 8 → 14 per round, total throughput unchanged |
+| Is our forward pass slower than Transformers for one stream? | parity to ~9% slower (36–38 vs 35 ms per token at concurrency 1; run-to-run noise ~5%) |
+| How does it compare with Ollama (llama.cpp + Metal) on the same Mac? | One stream: Ollama is **~3× faster** (fused Metal kernels vs ~1,200 PyTorch launches per step). 16 clients: MiniServe **304 vs 242 tok/s** and half the median TTFT — comparable-to-ahead, wide spread; caveats in BENCHMARK.md |
+| Did kernel-level tweaks help? | No — fused RMSNorm/RoPE (−32% kernel calls) ran 3–19% *slower* on MPS; `torch.compile` ~25× slower. Documented, not merged. |
 
 ![Output throughput vs concurrency](docs/img/bench/batching_output_token_throughput.png)
 

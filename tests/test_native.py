@@ -191,3 +191,63 @@ def test_int8_weight_only_quantization_is_close_and_smaller():
     finally:
         nat._INT8_MM_OK.update(saved)
     torch.testing.assert_close(fused, fallback, atol=1e-4, rtol=1e-4)
+
+
+def _check_int8_no_overflow(device: str) -> None:
+    from miniserve.backends.native import Int8Weight, linear
+
+    torch.manual_seed(0)
+    w = torch.randn(64, 1536) * 0.02
+    x = torch.randn(4, 1536) * 100  # hidden-state outliers of this magnitude are real
+    q = Int8Weight.from_float(w.half())
+    assert (x @ q.q.float().T).abs().max() > 65504  # the hazard: unscaled sums exceed fp16
+    ref = x @ w.T
+    q = Int8Weight(q.q.to(device), q.scale.to(device), q.dtype)
+    for dtype in (torch.float16, torch.bfloat16, torch.float32):
+        y = linear(x.to(device=device, dtype=dtype), q)
+        assert y.dtype == dtype and torch.isfinite(y).all(), dtype
+        rel = float((y.float().cpu() - ref).abs().max() / ref.abs().max())
+        assert rel < 0.02, (dtype, rel)
+
+
+def test_int8_matmul_does_not_overflow_in_fp16_fallback_path():
+    # Regression (found on SmolLM2, MPS fp16): int8 matmuls accumulate against raw int8 values
+    # and scale afterwards; with fp16 activations the unscaled sums overflowed to inf -> NaN
+    # logits -> only special tokens. Forcing the dequantize fallback reproduces it on CPU.
+    from miniserve.backends import native as nat
+
+    saved = dict(nat._INT8_MM_OK)
+    try:
+        for dt in (torch.float16, torch.bfloat16, torch.float32):
+            nat._INT8_MM_OK[("cpu", dt)] = False
+        _check_int8_no_overflow("cpu")
+    finally:
+        nat._INT8_MM_OK.clear()
+        nat._INT8_MM_OK.update(saved)
+
+
+def test_int8_matmul_does_not_overflow_in_fp16_fused_kernel():
+    _check_int8_no_overflow("cpu")
+    if torch.backends.mps.is_available():  # where the overflow was actually observed
+        _check_int8_no_overflow("mps")
+
+
+def test_int8_probe_detects_fused_kernel_and_odd_shapes_fall_back():
+    # Regression (root cause of empty int8 outputs on MPS): the capability probe used an 8x32
+    # weight, which the MPS kernel rejects (N, K must be multiples of 32), so every MPS call
+    # silently took the dequantize fallback - which then overflowed in fp16.
+    from miniserve.backends import native as nat
+
+    nat._INT8_MM_OK.clear()
+    devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else [])
+    for dev in devices:
+        assert nat._int8_mm_supported(torch.device(dev), torch.float32), dev
+        torch.manual_seed(1)
+        w = torch.randn(40, 48) * 0.02  # N, K not multiples of 32 -> fallback path
+        x = torch.randn(3, 48) * 100
+        q = nat.Int8Weight.from_float(w)
+        q = nat.Int8Weight(q.q.to(dev), q.scale.to(dev), torch.float16)
+        y = nat.linear(x.to(dev, torch.float16), q)
+        ref = x @ w.T
+        assert torch.isfinite(y).all()
+        assert float((y.float().cpu() - ref).abs().max() / ref.abs().max()) < 0.02

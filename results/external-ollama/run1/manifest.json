@@ -1,0 +1,82 @@
+{
+  "suite": "external-ollama",
+  "description": "M5 - same workload against Ollama (llama.cpp + Metal kernels) serving the same model in fp16 (smollm2:135m-instruct-fp16) on the same Mac. Both servers are driven as plain OpenAI clients (greedy, natural EOS, no ignore_eos) because Ollama cannot force output length. Ollama runs with OLLAMA_NUM_PARALLEL=16. See BENCHMARK.md for the (many) caveats.",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      11.97,
+      11.17,
+      11.07
+    ],
+    "time": "2026-10-15T05:26:02-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 12.2/10 cores, unmanaged cpu 5.6, lease cpu cap 4.0 (free 0.0) | RAM avail 5.9G, lease mem free 1.1G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 74.3\u00b0C avg 63.1\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "miniserve-native",
+      "env": {
+        "MINISERVE_MAX_NUM_SEQS": "32"
+      },
+      "external": null
+    },
+    {
+      "name": "ollama",
+      "env": {},
+      "external": {
+        "base_url": "http://127.0.0.1:11435",
+        "model": "smollm2:135m-instruct-fp16",
+        "kind": "openai"
+      }
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "external-c1",
+    "external-c4",
+    "external-c16"
+  ],
+  "runs": [
+    "external-c1__miniserve-native__r0.json",
+    "external-c4__miniserve-native__r0.json",
+    "external-c16__miniserve-native__r0.json",
+    "external-c1__ollama__r0.json",
+    "external-c4__ollama__r0.json",
+    "external-c16__ollama__r0.json",
+    "external-c1__ollama__r1.json",
+    "external-c4__ollama__r1.json",
+    "external-c16__ollama__r1.json",
+    "external-c1__miniserve-native__r1.json",
+    "external-c4__miniserve-native__r1.json",
+    "external-c16__miniserve-native__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      10.18,
+      10.71,
+      10.89
+    ],
+    "time": "2026-10-15T05:27:42-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 10.6/10 cores, unmanaged cpu 5.4, lease cpu cap 4.1 (free 0.1) | RAM avail 3.2G, lease mem free 1.3G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 73.3\u00b0C avg 63.5\u00b0C"
+  }
+}

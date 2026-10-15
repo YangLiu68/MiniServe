@@ -63,27 +63,34 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 class Int8Weight:
     """Weight-only int8 quantization (W8A16): symmetric, one scale per output channel.
 
-    ``q`` is int8 [out, in]; ``scale`` is [out] in the compute dtype; W ~= q * scale[:, None].
-    Activations stay in fp16/bf16/fp32. Per-output-channel scales make the matmul
-    ``(x @ q.T) * scale``, which PyTorch fuses in ``torch._weight_int8pack_mm`` on CPU/MPS.
+    ``q`` is int8 [out, in]; ``scale`` is fp32 [out]; W ~= q * scale[:, None]. Activations stay
+    in the model dtype. Per-output-channel scales make the matmul ``(x @ q.T) * scale``, which
+    PyTorch fuses in ``torch._weight_int8pack_mm`` on CPU/MPS.
+
+    Kernel choice: the fused kernel requires N and K to be multiples of 32 on MPS; other shapes
+    (and builds without the kernel) use a dequantize fallback. The fallback multiplies by the
+    *raw* int8 values (|q| <= 127) before scaling, so in fp16 its output overflows (inf -> NaN
+    logits); it therefore always computes in fp32. (Bug found on SmolLM2/MPS: a capability probe
+    with an invalid shape sent every MPS call to the fallback, which overflowed in fp16.)
     """
 
     q: torch.Tensor
-    scale: torch.Tensor
+    scale: torch.Tensor  # fp32
+    dtype: torch.dtype  # dtype of the original weight / model compute dtype
 
     @classmethod
     def from_float(cls, w: torch.Tensor) -> Int8Weight:
         w32 = w.float()
         scale = w32.abs().amax(dim=1).clamp(min=1e-8) / 127.0
         q = torch.round(w32 / scale[:, None]).clamp(-127, 127).to(torch.int8)
-        return cls(q.contiguous(), scale.to(w.dtype))
+        return cls(q.contiguous(), scale.contiguous(), w.dtype)
 
     @property
     def nbytes(self) -> int:
         return self.q.numel() + self.scale.numel() * self.scale.element_size()
 
     def dequantize_rows(self, rows: torch.Tensor) -> torch.Tensor:
-        return self.q[rows].to(self.scale.dtype) * self.scale[rows, None]
+        return (self.q[rows].float() * self.scale[rows, None]).to(self.dtype)
 
 
 _INT8_MM_OK: dict[tuple[str, torch.dtype], bool] = {}
@@ -92,22 +99,28 @@ _INT8_MM_OK: dict[tuple[str, torch.dtype], bool] = {}
 def _int8_mm_supported(device: torch.device, dtype: torch.dtype) -> bool:
     key = (device.type, dtype)
     if key not in _INT8_MM_OK:
-        try:
+        try:  # N and K multiples of 32: the fused MPS kernel rejects anything else
             x = torch.ones(2, 32, device=device, dtype=dtype)
-            w = torch.ones(8, 32, device=device, dtype=torch.int8)
-            torch._weight_int8pack_mm(x, w, torch.ones(8, device=device, dtype=dtype))
+            w = torch.ones(32, 32, device=device, dtype=torch.int8)
+            torch._weight_int8pack_mm(x, w, torch.ones(32, device=device, dtype=dtype))
             _INT8_MM_OK[key] = True
         except Exception:  # pragma: no cover - depends on torch build/device
             _INT8_MM_OK[key] = False
     return _INT8_MM_OK[key]
 
 
+def int8_matmul(x: torch.Tensor, w: Int8Weight) -> torch.Tensor:
+    """``x @ (q * scale).T`` with the fused kernel when possible, else an fp32 fallback."""
+    n, k = w.q.shape
+    if n % 32 == 0 and k % 32 == 0 and _int8_mm_supported(x.device, x.dtype):
+        return torch._weight_int8pack_mm(x.contiguous(), w.q, w.scale.to(x.dtype))
+    y = F.linear(x.float(), w.q.float()) * w.scale  # fp32: raw-int8 products overflow fp16
+    return y.to(x.dtype)
+
+
 def linear(x: torch.Tensor, w, b: torch.Tensor | None = None) -> torch.Tensor:
     if isinstance(w, Int8Weight):
-        if _int8_mm_supported(x.device, x.dtype):
-            y = torch._weight_int8pack_mm(x, w.q, w.scale)
-        else:  # dequantize-on-the-fly fallback
-            y = F.linear(x, w.q.to(x.dtype)) * w.scale
+        y = int8_matmul(x, w)
         return y if b is None else y + b
     return F.linear(x, w, b)
 

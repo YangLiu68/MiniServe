@@ -1,0 +1,70 @@
+{
+  "suite": "fairness",
+  "description": "M2 - fairness under contention. Capacity is limited to 4 running sequences; tenant 'heavy' keeps 12 requests in flight, tenant 'light' keeps 1 (64->64 tokens each). FCFS serves in arrival order; fair = Virtual Token Counter (Sheng et al., OSDI'24).",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      18.47,
+      14.55,
+      12.77
+    ],
+    "time": "2026-10-15T03:00:17-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 18.5/10 cores, unmanaged cpu 5.5, lease cpu cap 4.0 (free 0.0) | RAM avail 5.9G, lease mem free 0.7G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 72\u00b0C avg 61.9\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "fcfs",
+      "env": {
+        "MINISERVE_SCHEDULING_POLICY": "fcfs"
+      },
+      "external": null
+    },
+    {
+      "name": "fair-vtc",
+      "env": {
+        "MINISERVE_SCHEDULING_POLICY": "fair"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "heavy-vs-light"
+  ],
+  "runs": [
+    "heavy-vs-light__fcfs__r0.json",
+    "heavy-vs-light__fair-vtc__r0.json",
+    "heavy-vs-light__fair-vtc__r1.json",
+    "heavy-vs-light__fcfs__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      9.15,
+      11.42,
+      11.85
+    ],
+    "time": "2026-10-15T03:05:28-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 9.5/10 cores, unmanaged cpu 5.7, lease cpu cap 4.0 (free 0.0) | RAM avail 4.9G, lease mem free 0.5G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 71.2\u00b0C avg 61.5\u00b0C"
+  }
+}

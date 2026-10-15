@@ -1,0 +1,70 @@
+{
+  "suite": "prefix",
+  "description": "M4 - automatic prefix caching. Every request shares a 1024-token system prompt and adds a unique ~24-token question (16 output tokens); 4 closed-loop clients. Continuous batching on in both configs.",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      11.31,
+      10.68,
+      11.37
+    ],
+    "time": "2026-10-15T02:53:22-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 10.0/10 cores, unmanaged cpu 5.9, lease cpu cap 4.0 (free 0.0) | RAM avail 6.2G, lease mem free 0.1G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 71.6\u00b0C avg 61.5\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "prefix-cache-off",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+      },
+      "external": null
+    },
+    {
+      "name": "prefix-cache-on",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "true"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "shared-system-prompt"
+  ],
+  "runs": [
+    "shared-system-prompt__prefix-cache-off__r0.json",
+    "shared-system-prompt__prefix-cache-on__r0.json",
+    "shared-system-prompt__prefix-cache-on__r1.json",
+    "shared-system-prompt__prefix-cache-off__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      12.4,
+      11.09,
+      11.47
+    ],
+    "time": "2026-10-15T02:54:26-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 12.9/10 cores, unmanaged cpu 5.2, lease cpu cap 4.3 (free 0.3) | RAM avail 5.1G, lease mem free 0.9G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 73.1\u00b0C avg 62\u00b0C"
+  }
+}

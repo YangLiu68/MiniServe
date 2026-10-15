@@ -1,0 +1,75 @@
+{
+  "suite": "quant",
+  "description": "M5 - weight-only int8 (W8A16) vs fp16 on the native engine, MPS. Quality is measured separately (bench/eval_quant.py).",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      11.0,
+      11.09,
+      10.52
+    ],
+    "time": "2026-10-15T03:41:08-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 11.3/10 cores, unmanaged cpu 6.2, lease cpu cap 4.0 (free 0.0) | RAM avail 5.3G, lease mem free 0.1G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 72.3\u00b0C avg 62\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "fp16",
+      "env": {
+        "MINISERVE_QUANTIZATION": "none"
+      },
+      "external": null
+    },
+    {
+      "name": "fp16+w8",
+      "env": {
+        "MINISERVE_QUANTIZATION": "int8"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "quant-c1",
+    "quant-c16"
+  ],
+  "runs": [
+    "quant-c1__fp16__r0.json",
+    "quant-c16__fp16__r0.json",
+    "quant-c1__fp16+w8__r0.json",
+    "quant-c16__fp16+w8__r0.json",
+    "quant-c1__fp16+w8__r1.json",
+    "quant-c16__fp16+w8__r1.json",
+    "quant-c1__fp16__r1.json",
+    "quant-c16__fp16__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "45b5b4b35b1fad82d047d5cb621123147f592c55",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      10.03,
+      10.73,
+      10.44
+    ],
+    "time": "2026-10-15T03:42:52-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 10.3/10 cores, unmanaged cpu 5.6, lease cpu cap 4.0 (free 0.0) | RAM avail 4.3G, lease mem free 0.9G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 71.6\u00b0C avg 62\u00b0C"
+  }
+}
