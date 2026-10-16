@@ -46,6 +46,9 @@ class Stream:
     temperature: float = 0.0
     endpoint: str = "completions"
     prompts: list[str] | str | None = None  # real prompts (cycled in a seeded shuffled order)
+    # Fixed-length outputs (MiniServe/vLLM ignore EOS) make configs do identical work; turn off
+    # where natural endings matter (e.g. speculative decoding: text after EOS is repetitive).
+    ignore_eos: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in ("closed", "poisson"):
@@ -99,6 +102,7 @@ class RequestSpec:
     endpoint: str
     arrival: float | None = None  # seconds after start (open loop)
     extra: dict[str, Any] = field(default_factory=dict)
+    ignore_eos: bool = True
 
 
 class PromptFactory:
@@ -202,6 +206,7 @@ def build_requests(scenario: Scenario, factory: PromptFactory) -> list[list[Requ
                     st.temperature,
                     st.endpoint,
                     arrival,
+                    ignore_eos=st.ignore_eos,
                 )
             )
         out.append(specs)

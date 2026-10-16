@@ -104,18 +104,34 @@ def main() -> None:
             native.release(s)
 
     for b in [int(x) for x in args.verify_batches.split(",")] if args.verify else []:
-        for q in [int(x) for x in args.verify.split(",")]:
-            bm = BlockManager(native.num_kv_blocks, native.block_size, False)
-            seqs = make_seqs(native, bm, b, args.context)
-            for s in seqs:
-                bm.allocate(s, args.context + q)  # slots for the draft tokens
-            draft = tuple(range(100, 100 + q - 1))
-            batch = [ScheduledSeq(s, args.context, 1, draft) for s in seqs]
-            ms = timed(lambda batch=batch: native.execute(batch), args.device, args.iters)
-            result["verify"].append({"batch": b, "query": q, "step_ms": round(ms, 2)})
-            print(f"native verify  B={b:3d} q={q:2d}: {ms:7.2f} ms/step")
-            for s in seqs:
-                native.release(s)
+        # Interleaved: every round times each query length once (rotated order), so slow drift
+        # in GPU contention hits all lengths alike; medians over rounds.
+        qs = [int(x) for x in args.verify.split(",")]
+        bm = BlockManager(native.num_kv_blocks, native.block_size, False)
+        seqs = make_seqs(native, bm, b, args.context)
+        for s in seqs:
+            bm.allocate(s, args.context + max(qs))  # slots for the longest draft
+        batches = {
+            q: [ScheduledSeq(s, args.context, 1, tuple(range(100, 100 + q - 1))) for s in seqs]
+            for q in qs
+        }
+        samples: dict[int, list[float]] = {q: [] for q in qs}
+        for q in qs:  # warm up every shape
+            timed(lambda bq=batches[q]: native.execute(bq), args.device, 1, warmup=2)
+        for r in range(args.iters):
+            for q in qs[r % len(qs) :] + qs[: r % len(qs)]:
+                samples[q].append(
+                    timed(lambda bq=batches[q]: native.execute(bq), args.device, 1, 0)
+                )
+        base = statistics.median(samples[qs[0]])
+        for q in qs:
+            ms = statistics.median(samples[q])
+            result["verify"].append(
+                {"batch": b, "query": q, "step_ms": round(ms, 2), "vs_first": round(ms / base, 3)}
+            )
+            print(f"native verify  B={b:3d} q={q:2d}: {ms:7.2f} ms/step  x{ms / base:.2f}")
+        for s in seqs:
+            native.release(s)
 
     for n in [int(x) for x in args.prefill.split(",")]:
         bm = BlockManager(native.num_kv_blocks, native.block_size, False)

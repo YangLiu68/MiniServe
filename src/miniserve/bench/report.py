@@ -127,7 +127,7 @@ def table(agg: dict, scenario: str, configs: list[str], with_server: bool = True
     rows = [agg[(scenario, c)] for c in configs if (scenario, c) in agg]
     if not any(r.get("server.spec_acceptance", (None,))[0] is not None for r in rows):
         cols = [c for c in cols if c[0] != "draft accept"]  # only when speculation was used
-    lines =["| config | " + " | ".join(c for c, _ in cols) + " |", "|---|" + "---:|" * len(cols)]
+    lines = ["| config | " + " | ".join(c for c, _ in cols) + " |", "|---|" + "---:|" * len(cols)]
     for cfg in configs:
         a = agg.get((scenario, cfg))
         if a is None:

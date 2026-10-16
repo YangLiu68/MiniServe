@@ -111,7 +111,14 @@ def main() -> None:
     ap.add_argument("--sets", default="copy,open")
     ap.add_argument("--data", default="bench/data/spec_prompts.json")
     ap.add_argument("--out", default="results/speculative/sweep")
+    ap.add_argument("--render", default=None, help="only re-render table.md from results.json")
     args = ap.parse_args()
+    if args.render:
+        path = Path(args.render)
+        table = render(json.loads(path.read_text())["results"])
+        (path.parent / "table.md").write_text(table)
+        print(table)
+        return
 
     backend = NativeBackend.from_pretrained(
         DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION, args.device, args.dtype, kv_cache_mb=256
@@ -168,24 +175,28 @@ def main() -> None:
         ).stdout.strip(),
     }
     (out / "results.json").write_text(json.dumps({"env": env, "results": results}, indent=1))
+    (out / "table.md").write_text(render(results))
+    print(render(results))
+
+
+def render(results: dict) -> str:
     lines = [
         "| config | prompts | speedup (median, per prompt) | geomean | range | tok/s | "
         "tokens/step | acceptance | identical |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for c in names:
-        for s in sets:
-            m = results[c][s]["median"]
+    for c, by_set in results.items():
+        for s, r in by_set.items():
+            m = r["median"]
             acc = m.get("acceptance")
             lines.append(
                 f"| {c} | {s} | {m['speedup_median']:.2f}x | {m['speedup_geomean']:.2f}x | "
                 f"{m['speedup_min']:.2f}-{m['speedup_max']:.2f} | {m['tok_per_s']:.1f} | "
                 f"{m.get('tokens_per_decode_step') or 0:.2f} | "
                 f"{'-' if acc is None else f'{acc:.0%}'} | "
-                f"{m['identical_to_off']}/{m['requests']} |"
+                f"{min(x['identical_to_off'] for x in r['rounds'])}/{m['requests']:.0f} |"
             )
-    (out / "table.md").write_text("\n".join(lines) + "\n")
-    print("\n".join(lines))
+    return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":

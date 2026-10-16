@@ -1,0 +1,28 @@
+[
+ {
+  "set": "open",
+  "prompt": 0,
+  "position": 85,
+  "off_token": " One",
+  "spec_token": " He",
+  "fp32_logit_gap": 0.0083,
+  "fp32_top2": [
+   " One",
+   " He"
+  ],
+  "fp32_top2_gap": 0.0083
+ },
+ {
+  "set": "open",
+  "prompt": 7,
+  "position": 166,
+  "off_token": " that",
+  "spec_token": " is",
+  "fp32_logit_gap": 0.007,
+  "fp32_top2": [
+   " is",
+   " that"
+  ],
+  "fp32_top2_gap": 0.007
+ }
+]

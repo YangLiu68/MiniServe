@@ -55,7 +55,7 @@ def build_payload(spec: RequestSpec, model: str | None, server_kind: str) -> dic
         body["messages"] = [{"role": "user", "content": spec.prompt}]
     else:
         body["prompt"] = spec.prompt
-    if server_kind in ("miniserve", "vllm"):
+    if server_kind in ("miniserve", "vllm") and spec.ignore_eos:
         body["ignore_eos"] = True  # fixed-length outputs: comparable token counts across runs
     if server_kind == "vllm":
         body["stream_options"] = {"include_usage": True}

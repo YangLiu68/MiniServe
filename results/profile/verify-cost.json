@@ -1,0 +1,120 @@
+{
+  "device": "mps",
+  "dtype": "float16",
+  "context": 256,
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "1b25edf8e43df9341dafcc4d32ffe7a690df9ccb",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      7.81,
+      8.31,
+      9.8
+    ],
+    "time": "2026-10-15T17:20:40-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 7.9/10 cores, unmanaged cpu 6.2, lease cpu cap 4.0 (free 2.2) | RAM avail 6.0G, lease mem free 3.3G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 62.3\u00b0C avg 55.4\u00b0C"
+  },
+  "decode": [
+    {
+      "batch": 1,
+      "step_ms": 19.13,
+      "tokens_per_s": 52.3
+    }
+  ],
+  "prefill": [
+    {
+      "tokens": 64,
+      "step_ms": 43.32,
+      "tokens_per_s": 1477.2
+    }
+  ],
+  "hf_decode": [
+    {
+      "batch": 1,
+      "step_ms": 30.66,
+      "tokens_per_s": 32.6
+    }
+  ],
+  "verify": [
+    {
+      "batch": 1,
+      "query": 1,
+      "step_ms": 25.99,
+      "vs_first": 1.0
+    },
+    {
+      "batch": 1,
+      "query": 2,
+      "step_ms": 32.37,
+      "vs_first": 1.245
+    },
+    {
+      "batch": 1,
+      "query": 3,
+      "step_ms": 32.49,
+      "vs_first": 1.25
+    },
+    {
+      "batch": 1,
+      "query": 5,
+      "step_ms": 34.33,
+      "vs_first": 1.321
+    },
+    {
+      "batch": 1,
+      "query": 7,
+      "step_ms": 35.74,
+      "vs_first": 1.375
+    },
+    {
+      "batch": 1,
+      "query": 9,
+      "step_ms": 37.2,
+      "vs_first": 1.431
+    },
+    {
+      "batch": 4,
+      "query": 1,
+      "step_ms": 34.4,
+      "vs_first": 1.0
+    },
+    {
+      "batch": 4,
+      "query": 2,
+      "step_ms": 38.08,
+      "vs_first": 1.107
+    },
+    {
+      "batch": 4,
+      "query": 3,
+      "step_ms": 40.64,
+      "vs_first": 1.182
+    },
+    {
+      "batch": 4,
+      "query": 5,
+      "step_ms": 44.36,
+      "vs_first": 1.29
+    },
+    {
+      "batch": 4,
+      "query": 7,
+      "step_ms": 42.09,
+      "vs_first": 1.224
+    },
+    {
+      "batch": 4,
+      "query": 9,
+      "step_ms": 43.11,
+      "vs_first": 1.253
+    }
+  ]
+}

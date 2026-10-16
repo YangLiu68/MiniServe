@@ -122,3 +122,26 @@ def test_end_to_end_scenario_against_live_server():
     assert s["b"]["mean_prompt_tokens"] == 10.0
     assert s["all"]["ttft_ms"]["p50"] > 0
     assert res["server"]["steps"] > 0 and res["server"]["mean_batch_seqs"] >= 1
+
+
+def test_prompt_datasets_and_ignore_eos_switch(tmp_path):
+    from miniserve.bench.client import build_payload
+
+    data = tmp_path / "p.json"
+    data.write_text('{"set": ["first prompt", "second prompt"]}')
+    sc = Scenario.from_dict(
+        {
+            "name": "d",
+            "streams": [
+                {"num_requests": 5, "prompts": f"{data}:set", "endpoint": "chat"},
+                {"num_requests": 1, "prompts": ["only"], "ignore_eos": False},
+            ],
+        }
+    )
+    a, b = build_requests(sc, PromptFactory("bytes"))
+    assert sorted(r.prompt for r in a[:2]) == ["first prompt", "second prompt"]  # each pass
+    assert {r.prompt for r in a} == {"first prompt", "second prompt"}  # covers the dataset
+    chat = build_payload(a[0], None, "miniserve")
+    assert chat["messages"][0]["content"] in ("first prompt", "second prompt")
+    assert chat["ignore_eos"] is True  # default: fixed-length outputs
+    assert "ignore_eos" not in build_payload(b[0], None, "miniserve")  # natural endings

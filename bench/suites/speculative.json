@@ -3,7 +3,7 @@
   "tokenizer": "hf:HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f77366fa6b3b4b768ec3050bf629380bac",
   "rounds": 2,
   "port": 8100,
-  "description": "n-gram (prompt lookup) speculative decoding vs plain decoding, SmolLM2-135M on MPS fp16, greedy (outputs are the same text in both configs, so per-token latency is directly comparable). 'copy' prompts ask for edits/reformatting of a given text; 'open' prompts are free-form. Speculation is used only while <= 4 sequences decode, so the 16-client scenario checks that it switches off without a regression. Prefix caching off to isolate the effect.",
+  "description": "n-gram (prompt lookup) speculative decoding vs plain decoding, SmolLM2-135M on MPS fp16, greedy, natural output lengths (no ignore_eos; up to 192 tokens) — the outputs are the same text in both configs, so latencies are directly comparable, and the number of decode steps is a contention-free measure of the effect. 'copy' prompts ask for edits/reformatting of a given text; 'open' prompts are free-form. Speculation is used only while <= 4 sequences decode, so with 16 clients it is off except at the tail of the run (a check that it does no harm under load). Prefix caching off to isolate the effect.",
   "configs": [
     {
       "name": "spec-off",
@@ -43,8 +43,9 @@
           "num_requests": 12,
           "prompts": "bench/data/spec_prompts.json:copy",
           "endpoint": "chat",
-          "max_tokens": 256,
-          "temperature": 0.0
+          "max_tokens": 192,
+          "temperature": 0.0,
+          "ignore_eos": false
         }
       ]
     },
@@ -59,8 +60,9 @@
           "num_requests": 12,
           "prompts": "bench/data/spec_prompts.json:open",
           "endpoint": "chat",
-          "max_tokens": 256,
-          "temperature": 0.0
+          "max_tokens": 192,
+          "temperature": 0.0,
+          "ignore_eos": false
         }
       ]
     },
@@ -75,8 +77,9 @@
           "num_requests": 24,
           "prompts": "bench/data/spec_prompts.json:copy",
           "endpoint": "chat",
-          "max_tokens": 256,
-          "temperature": 0.0
+          "max_tokens": 192,
+          "temperature": 0.0,
+          "ignore_eos": false
         }
       ]
     },
@@ -91,8 +94,9 @@
           "num_requests": 48,
           "prompts": "bench/data/spec_prompts.json:copy",
           "endpoint": "chat",
-          "max_tokens": 256,
-          "temperature": 0.0
+          "max_tokens": 192,
+          "temperature": 0.0,
+          "ignore_eos": false
         }
       ]
     }

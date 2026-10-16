@@ -1,0 +1,514 @@
+{
+ "env": {
+  "device": "mps",
+  "dtype": "float16",
+  "max_tokens": 192,
+  "rounds": 2,
+  "configs": {
+   "off": {
+    "speculative": "none"
+   },
+   "k2": {
+    "speculative": "ngram",
+    "num_speculative_tokens": 2,
+    "ngram_max": 3,
+    "ngram_min": 2
+   },
+   "k4": {
+    "speculative": "ngram",
+    "num_speculative_tokens": 4,
+    "ngram_max": 3,
+    "ngram_min": 2
+   },
+   "k6": {
+    "speculative": "ngram",
+    "num_speculative_tokens": 6,
+    "ngram_max": 3,
+    "ngram_min": 2
+   },
+   "k4-min1": {
+    "speculative": "ngram",
+    "num_speculative_tokens": 4,
+    "ngram_max": 3,
+    "ngram_min": 1
+   }
+  },
+  "platform": "macOS-15.3.2-arm64-arm-64bit",
+  "loadavg_end": [
+   9.42041015625,
+   9.150390625,
+   10.64111328125
+  ],
+  "commit": "1b25edf"
+ },
+ "results": {
+  "off": {
+   "copy": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 1017.0,
+     "tok_per_s": 18.215,
+     "ms_per_output_token": 54.34,
+     "speedup_median": 1.0,
+     "speedup_geomean": 1.0,
+     "speedup_min": 1.0,
+     "speedup_max": 1.0,
+     "tokens_per_decode_step": 0.99,
+     "draft_tokens": 0.0,
+     "identical_to_off": 12.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 18.36,
+      "ms_per_output_token": 53.75,
+      "speedup_median": 1.0,
+      "speedup_geomean": 1.0,
+      "speedup_min": 1.0,
+      "speedup_max": 1.0,
+      "tokens_per_decode_step": 0.99,
+      "draft_tokens": 0,
+      "acceptance": null,
+      "identical_to_off": 12
+     },
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 18.07,
+      "ms_per_output_token": 54.93,
+      "speedup_median": 1.0,
+      "speedup_geomean": 1.0,
+      "speedup_min": 1.0,
+      "speedup_max": 1.0,
+      "tokens_per_decode_step": 0.99,
+      "draft_tokens": 0,
+      "acceptance": null,
+      "identical_to_off": 12
+     }
+    ]
+   },
+   "open": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 2191.0,
+     "tok_per_s": 20.604999999999997,
+     "ms_per_output_token": 48.31,
+     "speedup_median": 1.0,
+     "speedup_geomean": 1.0,
+     "speedup_min": 1.0,
+     "speedup_max": 1.0,
+     "tokens_per_decode_step": 0.999,
+     "draft_tokens": 0.0,
+     "identical_to_off": 12.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 2191,
+      "tok_per_s": 20.74,
+      "ms_per_output_token": 47.88,
+      "speedup_median": 1.0,
+      "speedup_geomean": 1.0,
+      "speedup_min": 1.0,
+      "speedup_max": 1.0,
+      "tokens_per_decode_step": 0.999,
+      "draft_tokens": 0,
+      "acceptance": null,
+      "identical_to_off": 12
+     },
+     {
+      "requests": 12,
+      "output_tokens": 2191,
+      "tok_per_s": 20.47,
+      "ms_per_output_token": 48.74,
+      "speedup_median": 1.0,
+      "speedup_geomean": 1.0,
+      "speedup_min": 1.0,
+      "speedup_max": 1.0,
+      "tokens_per_decode_step": 0.999,
+      "draft_tokens": 0,
+      "acceptance": null,
+      "identical_to_off": 12
+     }
+    ]
+   }
+  },
+  "k2": {
+   "copy": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 1017.0,
+     "tok_per_s": 29.049999999999997,
+     "ms_per_output_token": 33.975,
+     "speedup_median": 1.5095,
+     "speedup_geomean": 1.55,
+     "speedup_min": 0.804,
+     "speedup_max": 3.01,
+     "tokens_per_decode_step": 1.616,
+     "draft_tokens": 582.0,
+     "acceptance": 0.689,
+     "identical_to_off": 12.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 30.65,
+      "ms_per_output_token": 32.1,
+      "speedup_median": 1.509,
+      "speedup_geomean": 1.62,
+      "speedup_min": 0.912,
+      "speedup_max": 3.539,
+      "tokens_per_decode_step": 1.616,
+      "draft_tokens": 582,
+      "acceptance": 0.689,
+      "identical_to_off": 12
+     },
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 27.45,
+      "ms_per_output_token": 35.85,
+      "speedup_median": 1.51,
+      "speedup_geomean": 1.48,
+      "speedup_min": 0.696,
+      "speedup_max": 2.481,
+      "tokens_per_decode_step": 1.616,
+      "draft_tokens": 582,
+      "acceptance": 0.689,
+      "identical_to_off": 12
+     }
+    ]
+   },
+   "open": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 2183.0,
+     "tok_per_s": 22.015,
+     "ms_per_output_token": 45.334999999999994,
+     "speedup_median": 1.06,
+     "speedup_geomean": 1.0865,
+     "speedup_min": 0.7825,
+     "speedup_max": 1.804,
+     "tokens_per_decode_step": 1.138,
+     "draft_tokens": 620.0,
+     "acceptance": 0.4306,
+     "identical_to_off": 10.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 22.93,
+      "ms_per_output_token": 43.44,
+      "speedup_median": 1.076,
+      "speedup_geomean": 1.132,
+      "speedup_min": 0.842,
+      "speedup_max": 1.822,
+      "tokens_per_decode_step": 1.138,
+      "draft_tokens": 620,
+      "acceptance": 0.4306,
+      "identical_to_off": 10
+     },
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 21.1,
+      "ms_per_output_token": 47.23,
+      "speedup_median": 1.044,
+      "speedup_geomean": 1.041,
+      "speedup_min": 0.723,
+      "speedup_max": 1.786,
+      "tokens_per_decode_step": 1.138,
+      "draft_tokens": 620,
+      "acceptance": 0.4306,
+      "identical_to_off": 10
+     }
+    ]
+   }
+  },
+  "k4": {
+   "copy": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 1017.0,
+     "tok_per_s": 30.65,
+     "ms_per_output_token": 32.12,
+     "speedup_median": 1.6025,
+     "speedup_geomean": 1.8519999999999999,
+     "speedup_min": 0.9265,
+     "speedup_max": 5.492,
+     "tokens_per_decode_step": 1.795,
+     "draft_tokens": 913.0,
+     "acceptance": 0.5093,
+     "identical_to_off": 12.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 32.67,
+      "ms_per_output_token": 29.98,
+      "speedup_median": 1.568,
+      "speedup_geomean": 1.907,
+      "speedup_min": 0.784,
+      "speedup_max": 6.126,
+      "tokens_per_decode_step": 1.795,
+      "draft_tokens": 913,
+      "acceptance": 0.5093,
+      "identical_to_off": 12
+     },
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 28.63,
+      "ms_per_output_token": 34.26,
+      "speedup_median": 1.637,
+      "speedup_geomean": 1.797,
+      "speedup_min": 1.069,
+      "speedup_max": 4.858,
+      "tokens_per_decode_step": 1.795,
+      "draft_tokens": 913,
+      "acceptance": 0.5093,
+      "identical_to_off": 12
+     }
+    ]
+   },
+   "open": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 2183.0,
+     "tok_per_s": 21.915,
+     "ms_per_output_token": 45.375,
+     "speedup_median": 1.088,
+     "speedup_geomean": 1.0885,
+     "speedup_min": 0.7525,
+     "speedup_max": 2.065,
+     "tokens_per_decode_step": 1.163,
+     "draft_tokens": 1066.0,
+     "acceptance": 0.2889,
+     "identical_to_off": 10.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 22.23,
+      "ms_per_output_token": 44.64,
+      "speedup_median": 1.108,
+      "speedup_geomean": 1.098,
+      "speedup_min": 0.808,
+      "speedup_max": 2.021,
+      "tokens_per_decode_step": 1.163,
+      "draft_tokens": 1066,
+      "acceptance": 0.2889,
+      "identical_to_off": 10
+     },
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 21.6,
+      "ms_per_output_token": 46.11,
+      "speedup_median": 1.068,
+      "speedup_geomean": 1.079,
+      "speedup_min": 0.697,
+      "speedup_max": 2.109,
+      "tokens_per_decode_step": 1.163,
+      "draft_tokens": 1066,
+      "acceptance": 0.2889,
+      "identical_to_off": 10
+     }
+    ]
+   }
+  },
+  "k6": {
+   "copy": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 1017.0,
+     "tok_per_s": 31.39,
+     "ms_per_output_token": 31.155,
+     "speedup_median": 1.5665,
+     "speedup_geomean": 1.903,
+     "speedup_min": 1.0375,
+     "speedup_max": 6.7765,
+     "tokens_per_decode_step": 1.886,
+     "draft_tokens": 1162.0,
+     "acceptance": 0.4234,
+     "identical_to_off": 12.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 30.68,
+      "ms_per_output_token": 31.9,
+      "speedup_median": 1.422,
+      "speedup_geomean": 1.782,
+      "speedup_min": 0.926,
+      "speedup_max": 7.256,
+      "tokens_per_decode_step": 1.886,
+      "draft_tokens": 1162,
+      "acceptance": 0.4234,
+      "identical_to_off": 12
+     },
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 32.1,
+      "ms_per_output_token": 30.41,
+      "speedup_median": 1.711,
+      "speedup_geomean": 2.024,
+      "speedup_min": 1.149,
+      "speedup_max": 6.297,
+      "tokens_per_decode_step": 1.886,
+      "draft_tokens": 1162,
+      "acceptance": 0.4234,
+      "identical_to_off": 12
+     }
+    ]
+   },
+   "open": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 2183.0,
+     "tok_per_s": 22.729999999999997,
+     "ms_per_output_token": 43.835,
+     "speedup_median": 1.1135,
+     "speedup_geomean": 1.1484999999999999,
+     "speedup_min": 0.768,
+     "speedup_max": 2.944,
+     "tokens_per_decode_step": 1.173,
+     "draft_tokens": 1493.0,
+     "acceptance": 0.2163,
+     "identical_to_off": 10.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 23.58,
+      "ms_per_output_token": 42.25,
+      "speedup_median": 1.156,
+      "speedup_geomean": 1.169,
+      "speedup_min": 0.786,
+      "speedup_max": 2.247,
+      "tokens_per_decode_step": 1.173,
+      "draft_tokens": 1493,
+      "acceptance": 0.2163,
+      "identical_to_off": 10
+     },
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 21.88,
+      "ms_per_output_token": 45.42,
+      "speedup_median": 1.071,
+      "speedup_geomean": 1.128,
+      "speedup_min": 0.75,
+      "speedup_max": 3.641,
+      "tokens_per_decode_step": 1.173,
+      "draft_tokens": 1493,
+      "acceptance": 0.2163,
+      "identical_to_off": 10
+     }
+    ]
+   }
+  },
+  "k4-min1": {
+   "copy": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 1017.0,
+     "tok_per_s": 33.28,
+     "ms_per_output_token": 29.61,
+     "speedup_median": 1.7825,
+     "speedup_geomean": 1.93,
+     "speedup_min": 1.078,
+     "speedup_max": 4.821,
+     "tokens_per_decode_step": 2.022,
+     "draft_tokens": 1374.0,
+     "acceptance": 0.3843,
+     "identical_to_off": 11.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 36.14,
+      "ms_per_output_token": 27.06,
+      "speedup_median": 1.871,
+      "speedup_geomean": 2.017,
+      "speedup_min": 0.934,
+      "speedup_max": 5.634,
+      "tokens_per_decode_step": 2.022,
+      "draft_tokens": 1374,
+      "acceptance": 0.3843,
+      "identical_to_off": 11
+     },
+     {
+      "requests": 12,
+      "output_tokens": 1017,
+      "tok_per_s": 30.42,
+      "ms_per_output_token": 32.16,
+      "speedup_median": 1.694,
+      "speedup_geomean": 1.843,
+      "speedup_min": 1.222,
+      "speedup_max": 4.008,
+      "tokens_per_decode_step": 2.022,
+      "draft_tokens": 1374,
+      "acceptance": 0.3843,
+      "identical_to_off": 11
+     }
+    ]
+   },
+   "open": {
+    "median": {
+     "requests": 12.0,
+     "output_tokens": 2183.0,
+     "tok_per_s": 21.275,
+     "ms_per_output_token": 46.879999999999995,
+     "speedup_median": 1.0125,
+     "speedup_geomean": 1.0575,
+     "speedup_min": 0.6415,
+     "speedup_max": 2.329,
+     "tokens_per_decode_step": 1.227,
+     "draft_tokens": 3391.0,
+     "acceptance": 0.1191,
+     "identical_to_off": 10.0
+    },
+    "rounds": [
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 22.03,
+      "ms_per_output_token": 45.23,
+      "speedup_median": 1.04,
+      "speedup_geomean": 1.078,
+      "speedup_min": 0.687,
+      "speedup_max": 1.885,
+      "tokens_per_decode_step": 1.227,
+      "draft_tokens": 3391,
+      "acceptance": 0.1191,
+      "identical_to_off": 10
+     },
+     {
+      "requests": 12,
+      "output_tokens": 2183,
+      "tok_per_s": 20.52,
+      "ms_per_output_token": 48.53,
+      "speedup_median": 0.985,
+      "speedup_geomean": 1.037,
+      "speedup_min": 0.596,
+      "speedup_max": 2.773,
+      "tokens_per_decode_step": 1.227,
+      "draft_tokens": 3391,
+      "acceptance": 0.1191,
+      "identical_to_off": 10
+     }
+    ]
+   }
+  }
+ }
+}

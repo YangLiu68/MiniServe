@@ -1,0 +1,3 @@
+machine: load 9.5/10 cores, unmanaged cpu 4.9, lease cpu cap 4.6 (free 1.9) | RAM avail 2.9G, lease mem free 1.4G, pressure normal | gpu free 0/2
+thermal: fair, cpu die max 60°C avg 55.6°C
+17:15  up 3 days, 13:50, 15 users, load averages: 9.42 9.15 10.64
