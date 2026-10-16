@@ -3,7 +3,7 @@
 ```bash
 make install            # uv sync --extra hf --extra bench
 make lint               # ruff check + format --check
-make test               # 190 tests: toy + tiny random models, no downloads, CPU only
+make test               # 193 tests: toy + tiny random models, no downloads, CPU only
 make test-real          # +5 tests on the real SmolLM2-135M (downloads ~270 MB)
 uv run pytest -m "not torch and not real_model"   # what CI runs without torch installed
 ```
@@ -28,7 +28,7 @@ real uvicorn servers, real sockets and a real SIGTERM, and asserts on **compute 
 | HTTP API | `test_api.py` | 46 | response shapes, exact `max_tokens`, stream == non-stream (emoji/CJK), 13-case validation matrix, 400 limits incl. exact boundaries, auth, multi-tenant keys + per-tenant rate limits, loading → ready, failed load, 504 / in-band timeouts, chat (JSON + SSE, role chunk), `stop` / `ignore_eos`, `/metrics` contents, `/v1/engine`, draining, injected-backend ownership, block map + dashboard, 413 body limit, `.env.example` loads, `n=1` / `developer` role / text content parts, per-tenant prefix-cache scope |
 | Live sockets | `test_live_cancellation.py` | 5 | real TCP disconnect (stream and non-stream) stops generation (measured in produced tokens), cancel endpoint, cancel scoped to the owning tenant and allowed while draining, 503 overload |
 | Process | `test_drain.py` | 3 | **SIGTERM mid-stream: the stream completes, the process drains and exits**; zero drain timeout does not wait; refuses public bind without a key |
-| Native numerics | `test_native.py` | 25 | for Llama, Qwen2 (QKV bias) and Mistral tiny models: full-prefill logits == HF (atol 2e-5), chunked prefill (1/3/7) == full, **mixed ragged batch == individual HF runs**, greedy == HF reference, prefix-cache hit == cold, preemption under memory pressure == unconstrained; seeded sampling independent of batch composition; int8 close to fp (cos > 0.999) and smaller; fused int8 kernel == dequant fallback; int8 probe detects the MPS kernel, odd shapes fall back, no fp16 overflow; unsupported archs rejected |
+| Native numerics | `test_native.py` | 28 | for Llama, Qwen2 (QKV bias) and Mistral tiny models: full-prefill logits == HF (atol 2e-5), chunked prefill (1/3/7) == full, **mixed ragged batch == individual HF runs**, greedy == HF reference, prefix-cache hit == cold, preemption under memory pressure == unconstrained; seeded sampling independent of batch composition; int8 close to fp (cos > 0.999) and smaller; fused int8 kernel == dequant fallback; int8 probe detects the MPS kernel, odd shapes fall back, no fp16 overflow; unsupported archs rejected; mask-free single-sequence decode == explicit mask (bit-exact) |
 | HF backend | `test_hf_backend.py` | 4 | generic `DynamicCache` path on GPT-2 (non-Llama) == reference, preemption rebuilds caches, sampler unit tests, seeded API reproducibility |
 | SDK compatibility | `test_openai_sdk.py` | 1 | the official `openai` SDK: completions, chat, streaming, models, error classes |
 | Middleware | `test_middleware.py` | 5 | body-size limit by `Content-Length` and for chunked uploads, including through FastAPI's JSON parsing on the real endpoint |
@@ -77,20 +77,25 @@ A test-helper pitfall worth remembering: `policy or FCFSPolicy()` silently repla
 
 | Date | Command | Result |
 |---|---|---|
-| 2026-10-15 | `make lint` | clean (src, tests, bench, examples) |
-| 2026-10-15 | `make test` | **142 passed**, 4 skipped (real-model, opt-in) |
-| 2026-10-15 | `make test-real` | **4 passed** (CPU fp32; native engine token-identical to Transformers on SmolLM2) |
-| 2026-10-15 | `pytest --cov` (core modules) | engine 95%, scheduler 95%, block manager 99%, server 95%, native backend 89%, policy 93% |
+| 2026-10-15 | `make lint` + `actionlint` | clean (src, tests, bench, examples; workflow) |
+| 2026-10-15 | `make test` | **193 passed**, 5 skipped (real-model, opt-in) |
+| 2026-10-15 | `make test-real` | **5 passed** (CPU fp32; native engine and speculative decoding token-identical to Transformers on SmolLM2) |
+| 2026-10-15 | `pytest --cov` | total 91%; engine 96%, scheduler 96%, block manager 99%, server 95%, native backend 90%, policy 94%, sampling 97%, speculative 100% |
+| 2026-10-15 | CI replica: torch-free job (clean env, `uv sync --frozen`) | 140 passed, 2 skipped (working tree committed as 9bf627d) |
+| 2026-10-15 | CI replica: Python 3.11.14 job + toy bench smoke test | 190 passed, 5 skipped (working tree committed as 9bf627d); suite + report generated |
 
 Host: Apple M4 (10 cores, 16 GB), macOS 15.3.2, Python 3.12.10, torch 2.14.1, transformers
 5.19.0. GitHub Actions is configured (lint; tests on 3.11 + 3.12 with CPU torch; torch-free core;
-Docker build + container smoke test) but **has not run yet** — the repository has not been
-pushed.
+Docker build + container smoke test) but **has not run on GitHub** — the repository has not been
+pushed. Every job except Docker was replicated locally (rows above); the Docker build and
+container smoke test remain unverified (no Docker on this machine).
 
 ## Flakiness notes
 
 * Timing-based tests use generous margins, but a severely starved runner could still flake
-  them; they are the first suspects if CI is red.
+  them; they are the first suspects if CI is red. Seen once: `test_requests_are_batched_concurrently`
+  took 1.27 s against a 1.14 s bound during a full run at load average ~27; it passed 5/5 when
+  re-run alone.
 * On the development machine imports are I/O-bound and slow (several seconds for
   FastAPI/torch) because the machine is shared with other heavy jobs; suite wall time is
   dominated by that, not by test bodies.

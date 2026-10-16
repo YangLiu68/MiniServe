@@ -1,0 +1,44 @@
+{
+ "device": "mps",
+ "dtype": "float16",
+ "env": {
+  "miniserve": "0.1.0",
+  "git_sha": "069ae990c92eb381d33c1d46d10930999bc4473f",
+  "git_dirty": true,
+  "python": "3.12.10",
+  "platform": "macOS-15.3.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "cpu": "Apple M4",
+  "cpu_count": 10,
+  "memory_gb": 16.0,
+  "loadavg": [
+   9.74,
+   11.32,
+   12.62
+  ],
+  "time": "2026-10-15T19:57:55-0700",
+  "torch": "2.14.1",
+  "transformers": "5.19.0",
+  "rq_status": "machine: load 9.7/10 cores, unmanaged cpu 5.5, lease cpu cap 4.0 (free 1.1) | RAM avail 6.0G, lease mem free 3.1G, pressure normal | gpu free 1/2\nthermal: fair, cpu die max 65.9\u00b0C avg 58\u00b0C"
+ },
+ "rows": [
+  {
+   "context": 128,
+   "native_ms": 24.46,
+   "hf_ms": 28.49,
+   "hf_over_native": 1.177
+  },
+  {
+   "context": 512,
+   "native_ms": 30.78,
+   "hf_ms": 34.33,
+   "hf_over_native": 1.143
+  },
+  {
+   "context": 1024,
+   "native_ms": 34.1,
+   "hf_ms": 37.41,
+   "hf_over_native": 1.111
+  }
+ ]
+}

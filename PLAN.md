@@ -37,7 +37,10 @@ MiniServe is an educational but real text-generation server. The portfolio point
 | M4 | KV-cache reuse; integration vs original clearly distinguished; correctness + memory tests | ✅ | `hf` backend = Transformers `DynamicCache` (integration); `block_manager.py` + `native.py` = original paged cache + prefix caching; 10 block-manager tests, prefix/preemption exactness tests; BENCHMARK.md §Prefix caching |
 | M5 | Quantized backend or external comparison adapter; compatibility + caveats | ✅ | int8 W8A16 + quality eval; Ollama comparison suite (run) and vLLM template (not run); model compatibility matrix |
 | M6 | Load generator + benchmark report (arrival rates, lengths, concurrency, P50/P95 TTFT, tok/s, memory, errors, tails) | ✅ | `miniserve-bench`; BENCHMARK.md |
-| M7 | Docker, health/readiness, structured logs, metrics, graceful shutdown, CI, architecture diagram, demo | ✅ (CI/Docker not executed locally) | Dockerfile, compose, `.github/workflows/ci.yml`, `/metrics`, JSON logs, SIGTERM drain test, ARCHITECTURE.md, dashboard, docs/DEMO.md |
+| M7 | Docker, health/readiness, structured logs, metrics, graceful shutdown, CI, architecture diagram, demo | ✅ (CI jobs replicated locally except Docker) | Dockerfile, compose, `.github/workflows/ci.yml`, `/metrics`, JSON logs, SIGTERM drain test, ARCHITECTURE.md, dashboard, docs/DEMO.md |
+
+| M8 | Extension: speculative decoding with n-gram drafts | ✅ | `speculative.py`, draft verification in scheduler/native/sampling; exactness + distribution tests; BENCHMARK.md §Speculative decoding |
+| M9 | Hardening: independent review, CI replicated locally | ✅ | 7 confirmed findings fixed with regression tests (TESTING.md bugs 11–17); lint, actionlint, torch-free job, py3.11 job and bench smoke run locally |
 
 ### Acceptance criteria (beyond M1, which is detailed in TESTING.md)
 
@@ -57,11 +60,15 @@ MiniServe is an educational but real text-generation server. The portfolio point
   RSS/KV/device memory, mean batch size, preemptions, load average.
 - **M7.** Readiness fails while loading/draining; SIGTERM mid-stream completes the stream and
   exits; image refuses to start publicly without a key (CI step).
+- **M8.** Greedy output with speculation identical to without (fp32: tiny + real model); the
+  sampling rule preserves the target distribution (statistical test); stop strings, EOS and
+  `max_tokens` inside accepted drafts behave exactly as without; measured speedup on copy-style
+  and free-form prompts with a paired design, including the cases where it does not help.
 
 ## Explicit non-goals
 
 - Beating vLLM/TGI/llama.cpp; custom CUDA/Metal kernels; tensor/pipeline parallelism;
-  speculative decoding; LoRA; multi-node.
+  draft-model / EAGLE / Medusa speculation (n-gram drafts only); LoRA; multi-node.
 - logprobs, `n > 1`, beam search, tool calling, JSON mode.
 - Persistence of the prefix cache across restarts; distributed rate limiting.
 - Public Internet exposure without a gateway (TLS, real auth).
@@ -92,11 +99,35 @@ MiniServe is an educational but real text-generation server. The portfolio point
 - **Benchmarks** run under resource-manager leases on the shared machine; see BENCHMARK.md for
   results, spreads and caveats.
 
+### 2026-10-15 (later) — M8, M9
+- **Speculative decoding** (n-gram / prompt-lookup drafts): proposer with an incremental n-gram
+  index; drafts only for small decode batches, never preempting; verification as extra query rows
+  of the batched pass; greedy and distribution-preserving sampled acceptance; multi-token steps in
+  the engine. Paired benchmark: copy-style prompts 1.60× median per-prompt speedup (up to 5.5×),
+  free-form 1.09×; over HTTP 1.55× / 1.65× throughput at 1 / 4 clients, neutral at 16; fp16
+  divergences traced to fp32 near-ties (gap < 0.01). A first HTTP run used fixed-length outputs
+  (ignore_eos), which flatters n-gram drafts; it was discarded and the suite fixed.
+- **Measurement lesson:** a first block-per-config sweep showed speculation *slower*; a step
+  probe showed the GPU shared with another job (plain decode drifting 50–77 ms), so the sweep was
+  redone with every prompt run under all configs back to back.
+- **Single-sequence decode without an attention mask:** +17–21% per step (paired A/B); a paired
+  step A/B against Transformers now has our forward 11–18% faster (was parity to ~9% slower).
+- **Independent review** (separate agent, reproduced each finding with a script): VTC idle credit
+  when the queue was empty, SentencePiece leading space on the first token, chunked uploads over
+  the limit answered 400 not 413, cross-tenant cancel, cancel refused while draining, prefix hit
+  rate inflated by recompute, fair policy never forgetting tenants. All fixed with regression
+  tests; the reviewer's scripts re-run against the fixes.
+- Per-tenant prefix-cache scope (cache-salt) against cross-tenant prompt inference; `n=1`,
+  `developer` role and text content parts accepted.
+- **CI replicated locally:** ruff, actionlint (fixed a shellcheck warning), the torch-free job in a
+  clean environment, the Python 3.11 job and the bench smoke test. Docker still unverified.
+
 ### Remaining risks / next steps
 - Single-stream decode is launch-bound (~850–1,250 kernel launches per step); fused kernels
   (Triton/Metal) or graph capture are the real fix; `torch.compile` was evaluated (BENCHMARK.md).
 - Gather-based attention materializes K/V per step; a true paged-attention kernel is the main
   gap to vLLM.
-- CI and Docker are configured but have not run (repository not pushed).
+- GitHub Actions has not run on GitHub (repository not pushed); its jobs were replicated locally
+  except the Docker build/smoke test (no Docker on this machine).
 - Benchmarks were taken on a contended laptop; absolute numbers will differ on a quiet machine,
   relative comparisons were made robust with rotated rounds.

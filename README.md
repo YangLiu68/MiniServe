@@ -37,10 +37,11 @@ recorded with every run); medians of 2 rounds with rotated order. Full tables, s
 | Long prompts stalling streams that are already running? | chunked prefill: chat inter-token p95 **663 → 163 ms**, at +29% TTFT for the long prompts themselves |
 | Shared 1,024-token system prompt (prefix caching)? | TTFT p50 **671 → 75 ms**, 3× throughput, 94% of prompt tokens served from cache |
 | One tenant flooding the server? | fair (VTC) scheduling: the light tenant's TTFT p50 **4.6 → 2.1 s**, its completions 8 → 14 per round, total throughput unchanged |
-| Is our forward pass slower than Transformers for one stream? | parity to ~9% slower (36–38 vs 35 ms per token at concurrency 1; run-to-run noise ~5%) |
+| Is our forward pass slower than Transformers for one stream? | Not any more: parity to ~9% slower in the suite, then **11–18% faster** per decode step (paired A/B) after dropping a redundant attention mask |
+| Speculative decoding (n-gram drafts)? | copy-style tasks (edit, reformat, quote): **1.60× median per-prompt speedup** (up to 5.5×), outputs identical; over HTTP **1.55× (1 client) / 1.65× (4 clients) throughput**; free-form questions 1.09–1.15×; switches itself off under heavy load |
 | int8 weight-only quantization? | weights 257 → 129 MB, perplexity unchanged (14.62 → 14.61), single-stream decode 13% faster |
 | How does it compare with Ollama (llama.cpp + Metal) on the same Mac? | One stream: Ollama is **~3× faster** (fused Metal kernels vs ~1,200 PyTorch launches per step). 16 clients: MiniServe **304 vs 242 tok/s** and half the median TTFT — comparable-to-ahead, wide spread; caveats in BENCHMARK.md |
-| Did kernel-level tweaks help? | No — fused RMSNorm/RoPE (−32% kernel calls) ran 3–19% *slower* on MPS; `torch.compile` ~25× slower. Documented, not merged. |
+| Did kernel-level tweaks help? | One did: dropping the attention mask for single-sequence decode, **+17–21% per step** (paired A/B). Fused RMSNorm/RoPE (−32% kernel calls) ran 3–19% *slower* on MPS and `torch.compile` ~25× slower — documented, not merged. |
 
 ![Output throughput vs concurrency](docs/img/bench/batching_output_token_throughput.png)
 

@@ -146,7 +146,39 @@ $ MINISERVE_SCHEDULING_POLICY=fair examples/multi_tenant.sh | grep BOB
      BOB  queue     2066 ms   ttft     2105 ms
 ```
 
-## 9. Graceful shutdown
+## 9. Speculative decoding
+
+The same chat request (fix the typos in a two-sentence paragraph, greedy, 120 tokens max) sent
+three times to a server started without and then with `MINISERVE_SPECULATIVE=ngram`
+(captures in `results/speculative/demo/`):
+
+```console
+$ MINISERVE_SPECULATIVE=ngram MINISERVE_API_KEY=demo-key uv run miniserve
+$ curl -s localhost:8000/v1/chat/completions -H 'Authorization: Bearer demo-key' -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"Correct the spelling mistakes in this paragraph. Reply with the corrected paragraph only.\n\nThe libary opens at nine oclock every morning, exept on Sundays when it stays closed. Visitors can borow up to five books at a time and keep them for two weeks."}],"max_tokens":120,"temperature":0}'
+{
+    "choices": [{"message": {"role": "assistant", "content": "The libary opens at nine oclock every morning, except on Sundays when it stays closed. Visitors can borrow five books at a time and keep them for two weeks."}, "finish_reason": "stop", …}],
+    "usage": {"prompt_tokens": 86, "completion_tokens": 34, "total_tokens": 120,
+              "prompt_tokens_details": {"cached_tokens": 80}},
+    "miniserve": {"timings": {"ttft_ms": 26.9, "total_ms": 354.7, "decode_tokens_per_s": 110.64},
+                  "speculative": {"draft_tokens": 32, "accepted_tokens": 24}, …}
+}
+```
+
+| server | completion | total time | decode speed |
+|---|---|---:|---:|
+| `MINISERVE_SPECULATIVE=none` | identical text, 34 tokens | 828–916 ms | 39–43 tok/s |
+| `MINISERVE_SPECULATIVE=ngram` | identical text, 34 tokens | 355–409 ms | 99–111 tok/s |
+
+24 of the 32 draft tokens were accepted (most of the answer is copied from the prompt), so the 33
+tokens after the first took 9 decode steps instead of 33 (each step emits its accepted drafts plus
+one token of its own). Prefix caching was on in both servers, hence `cached_tokens` on the
+repeated request. The text is token-for-token the same as without
+speculation. (The 135M model fixes only some of the typos; that is the model, not the server.)
+`/v1/engine` and `/metrics` report the acceptance (`miniserve_spec_accepted_tokens_total`), and
+the dashboard shows it as a tile.
+
+## 10. Graceful shutdown
 
 ```console
 $ kill -TERM <pid>
@@ -158,7 +190,7 @@ $ kill -TERM <pid>
 In-flight streams are allowed to finish (up to `MINISERVE_DRAIN_TIMEOUT_S`) while readiness fails
 and new requests get 503 — covered by a test that sends a real SIGTERM mid-stream.
 
-## 10. Benchmark it yourself
+## 11. Benchmark it yourself
 
 ```console
 $ uv run miniserve-bench suite bench/suites/toy-batching.json --out results/toy/mine     # ~2 min, no download

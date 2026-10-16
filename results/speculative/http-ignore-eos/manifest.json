@@ -1,0 +1,86 @@
+{
+  "suite": "speculative",
+  "description": "n-gram (prompt lookup) speculative decoding vs plain decoding, SmolLM2-135M on MPS fp16, greedy (outputs are the same text in both configs, so per-token latency is directly comparable). 'copy' prompts ask for edits/reformatting of a given text; 'open' prompts are free-form. Speculation is used only while <= 4 sequences decode, so the 16-client scenario checks that it switches off without a regression. Prefix caching off to isolate the effect.",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "1b25edf8e43df9341dafcc4d32ffe7a690df9ccb",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      13.03,
+      26.87,
+      36.71
+    ],
+    "time": "2026-10-15T18:16:23-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 13.0/10 cores, unmanaged cpu 4.6, lease cpu cap 4.9 (free 2.4) | RAM avail 4.6G, lease mem free 0.4G, pressure normal | gpu free 0/2\nthermal: fair, cpu die max 61.3\u00b0C avg 56.2\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "spec-off",
+      "env": {
+        "MINISERVE_SPECULATIVE": "none"
+      },
+      "external": null
+    },
+    {
+      "name": "spec-ngram",
+      "env": {
+        "MINISERVE_SPECULATIVE": "ngram",
+        "MINISERVE_NUM_SPECULATIVE_TOKENS": "4"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "copy-c1",
+    "open-c1",
+    "copy-c4",
+    "copy-c16"
+  ],
+  "runs": [
+    "copy-c1__spec-off__r0.json",
+    "open-c1__spec-off__r0.json",
+    "copy-c4__spec-off__r0.json",
+    "copy-c16__spec-off__r0.json",
+    "copy-c1__spec-ngram__r0.json",
+    "open-c1__spec-ngram__r0.json",
+    "copy-c4__spec-ngram__r0.json",
+    "copy-c16__spec-ngram__r0.json",
+    "copy-c1__spec-ngram__r1.json",
+    "open-c1__spec-ngram__r1.json",
+    "copy-c4__spec-ngram__r1.json",
+    "copy-c16__spec-ngram__r1.json",
+    "copy-c1__spec-off__r1.json",
+    "open-c1__spec-off__r1.json",
+    "copy-c4__spec-off__r1.json",
+    "copy-c16__spec-off__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "1b25edf8e43df9341dafcc4d32ffe7a690df9ccb",
+    "git_dirty": true,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      14.67,
+      18.25,
+      19.34
+    ],
+    "time": "2026-10-15T18:43:57-0700",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 15.0/10 cores, unmanaged cpu 4.5, lease cpu cap 5.0 (free 3.0) | RAM avail 3.2G, lease mem free 1.5G, pressure normal | gpu free 0/2\nthermal: fair, cpu die max 62.4\u00b0C avg 57\u00b0C"
+  }
+}

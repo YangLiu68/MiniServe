@@ -1,0 +1,4 @@
+miniserve_spec_draft_tokens_total 96.0
+miniserve_spec_draft_tokens_created 1.792119498323711e+09
+miniserve_spec_accepted_tokens_total 72.0
+miniserve_spec_accepted_tokens_created 1.7921194983237178e+09

@@ -9,14 +9,15 @@ is explicitly caveated.
 | Question | Measured answer |
 |---|---|
 | Continuous batching vs one-request-at-a-time (16 clients) | **197 vs 24–29 output tok/s** (6.8–8.3×); median TTFT **0.46 s vs 32–38 s**; per-token latency 35 → 73 ms |
-| Is our forward pass slower than Transformers for one stream? | parity to ~9% slower: TPOT 36–38 ms (ours) vs 35 ms (Transformers) at concurrency 1; run-to-run noise ~5% |
+| Is our forward pass slower than Transformers for one stream? | suite (before the mask fix): parity to ~9% slower. Paired decode-step A/B after dropping the single-sequence attention mask: **ours 11–18% faster** (128–1,024 tokens of context) |
 | Head-of-line blocking behind long generations | chat TTFT p50 **13.5 s → 87 ms** |
 | Long prompts stalling running streams | chunked prefill cuts chat ITL p95 **663 → 163 ms**; long prompts' own TTFT +29% |
 | Prefix caching (1,024-token shared system prompt) | TTFT p50 **671 → 75 ms**, throughput **3×**, 94% of prompt tokens from cache, peak KV 18% → 5% |
 | Fairness (heavy tenant: 12 in flight, light: 1; 4 slots) | VTC: light tenant TTFT p50 **4.6 → 2.1 s**, 8 → 14 completions per round; total throughput unchanged |
 | int8 weight-only quantization | weights **257 → 129 MB**, perplexity 14.617 → 14.610 (unchanged), 96.9% top-1 agreement; single-stream decode **13% faster** |
 | Ollama (llama.cpp + Metal) on the same Mac | 1 client: Ollama **~3× faster** (112 vs 39 tok/s). 16 clients: MiniServe **304 vs 242 tok/s**, TTFT p50 238 vs 477 ms (wide spread) |
-| Two kernel-level optimizations tried | **both slower on MPS** (fused RMSNorm/RoPE +3–19%; `torch.compile` ~25×) — not merged |
+| Speculative decoding (n-gram drafts), greedy | copy-style tasks (edit / reformat / quote): **1.60× median per-prompt speedup** (geomean 1.85×, up to 5.5×), 12/12 outputs identical; over HTTP **1.55× / 1.65× throughput at 1 / 4 clients**; free-form questions 1.09–1.15×; neutral at 16 clients (auto-off) |
+| Kernel-level optimizations tried | dropping the attention mask for single-sequence decode: **+17–21% per step** (merged); fused RMSNorm/RoPE (+3–19% *slower*) and `torch.compile` (~25× slower) not merged |
 
 ## Setup and methodology
 
@@ -94,7 +95,8 @@ own `DynamicCache`, one request at a time (the M1 design); `native-sequential` =
 delay explodes (TTFT 32–38 s at 16 clients). Continuous batching scales throughput with load
 (6.8× the Transformers baseline at 16 clients) and keeps TTFT sub-second. The trade-off is per-
 token latency: each step now carries 15 sequences, so TPOT doubles (35 → 73 ms). At concurrency 1
-our engine is at parity to ~9% slower per token than Transformers (35.9–37.9 vs 34.7 ms). The two
+our engine was at parity to ~9% slower per token than Transformers (35.9–37.9 vs 34.7 ms; since
+improved, see Attempt 3 in the optimization log). The two
 native configs do identical work at concurrency 1 yet differ by 5%, which is the noise floor of
 these runs; to the extent the gap is real, our per-step metadata construction and gather-based
 attention cost a little more than HF's contiguous cache when there is nothing to batch.
@@ -253,6 +255,89 @@ token counts for Ollama streams come from its chunks; the shared machine was bus
 only. vLLM requires CUDA; `bench/suites/external-vllm.json` is a ready-to-run template for a CUDA
 host and has **not** been executed.
 
+## Speculative decoding with n-gram drafts (`bench/spec_sweep.py`, suite `speculative`)
+
+**Workload.** 24 prompts written for this benchmark (`bench/data/spec_prompts.json`): 12 *copy*
+tasks whose answer largely reuses the input (fix spelling, add a docstring, rename a variable,
+reformat a list, quote the answer sentence, convert to JSON / a table) and 12 *open* questions
+(stories, explanations). Chat template, greedy, up to 192 output tokens, one request at a time,
+prefix caching off.
+
+**Method — paired, because the GPU was shared.** A first attempt ran each configuration as a
+block of 12 prompts; it showed speculation *slower* (40 → 55 s), but a step-level probe in the
+same period found the plain decode step itself drifting between 50 and 77 ms (normally ~15 ms):
+another job was using the GPU. The final sweep therefore runs every prompt under all
+configurations back to back, in an order rotated per prompt and round, with a fresh engine per
+request, and reports the **per-prompt speedup** time(off) / time(config); 2 rounds, medians
+(`results/speculative/sweep/`, commit `1b25edf`, load average 8–10).
+
+| config | prompts | speedup, median per prompt | geomean | per-prompt range | tokens / decode step | draft tokens accepted | outputs identical to off |
+|---|---|---:|---:|---:|---:|---:|---:|
+| k=2 | copy | 1.51× | 1.55× | 0.80–3.01 | 1.62 | 69% | 12/12 |
+| **k=4 (default)** | **copy** | **1.60×** | **1.85×** | 0.93–5.49 | 1.79 | 51% | **12/12** |
+| k=6 | copy | 1.57× | 1.90× | 1.04–6.78 | 1.89 | 42% | 12/12 |
+| k=4, n-gram ≥ 1 | copy | 1.78× | 1.93× | 1.08–4.82 | 2.02 | 38% | 11/12 |
+| k=2 | open | 1.06× | 1.09× | 0.78–1.80 | 1.14 | 43% | 10/12 |
+| **k=4 (default)** | **open** | **1.09×** | 1.09× | 0.75–2.06 | 1.16 | 29% | 10/12 |
+| k=6 | open | 1.11× | 1.15× | 0.77–2.94 | 1.17 | 22% | 10/12 |
+| k=4, n-gram ≥ 1 | open | 1.01× | 1.06× | 0.64–2.33 | 1.23 | 12% | 10/12 |
+
+(k = draft tokens per step; n-gram lookup from 3 tokens down to 2, or down to 1. Absolute speed
+in this period was 18–21 tok/s without speculation — about half of a quiet machine — which is why
+only ratios are reported.)
+
+* **Copy tasks: ~1.6× typical, up to 5–7×** on prompts whose answer is a near-verbatim copy
+  (the SQL and list-reformatting prompts); a few prompts whose answer drifts from the input gain
+  nothing (per-prompt minimum 0.8–1.0×). Larger k accepts a smaller fraction but more tokens per
+  step; k = 4–6 is the sweet spot here. Matching down to single tokens (n-gram ≥ 1) proposes more
+  often and wins on copy tasks but helps least on open questions — the default stays n ≥ 2.
+* **Open questions: no slowdown on average** (1.06–1.11× median), but individual prompts range
+  from 0.75× to 2–3×: when drafts are mostly rejected, the verification overhead below is paid
+  for nothing.
+* **Why it pays.** `profile_step.py --verify` (interleaved, `results/profile/verify-cost.json`):
+  verifying 1 + q draft tokens in one step costs, relative to a plain step, ×1.25 (q = 1),
+  ×1.32 (q = 4) and ×1.43 (q = 8) for one sequence, and ×1.29 (q = 4) for four sequences. With
+  1.79 tokens per decode step on copy tasks and an average step cost between ×1.0 (steps where no
+  draft was found) and ×1.32 (full drafts), the expected speedup is 1.36–1.79× — consistent with
+  the measured 1.60×. Most of the jump from q = 0 to q = 1 is the
+  explicit attention mask, which a plain single-sequence decode no longer needs (see the
+  optimization log).
+* **Exactness.** Greedy speculative decoding is token-identical to plain decoding in fp32 (tests on
+  tiny models and on the real model). On MPS fp16 all 12 copy outputs and 10/12 open outputs were
+  identical; `bench/spec_divergence.py` found that both divergences happen where the **fp32
+  logit gap between the two candidate tokens is 0.007–0.008** — numerical near-ties that fp16
+  verification (k + 1 query rows) and plain decoding (1 row) break differently. In one of the two
+  cases fp32 prefers the speculative run's token (`results/speculative/divergence.json`).
+
+**End to end over HTTP** (suite `speculative`, `results/speculative/http/`, commit `069ae99`).
+Same prompts through the server and the streaming load generator, natural output lengths (≤ 192
+tokens), closed-loop clients, prefix caching off, 2 rounds with rotated config order. This run
+happened in a quiet period (tight spreads), so the block design is usable here; the number of
+engine steps is deterministic and contention-free.
+
+| scenario | config | out tok/s | TPOT p50 | E2E p95 | engine steps | draft tokens accepted |
+|---|---|---:|---:|---:|---:|---:|
+| copy, 1 client | off | 35.9 | 27.0 ms | 5,341 ms | 1,027 | – |
+| | **ngram** | **55.5 (1.55×)** | **17.4 ms** | **3,649 ms** | **572** | 51% |
+| open, 1 client | off | 36.0 | 27.2 ms | 5,755 ms | 2,193 | – |
+| | ngram | 41.3 (1.15×) | 25.6 ms | 5,167 ms | 1,878 | 29% |
+| copy, 4 clients | off | 91.0 | 38.0 ms | 7,422 ms | 579 | – |
+| | **ngram** | **149.9 (1.65×)** | **24.1 ms** | **5,231 ms** | **319** | 51% |
+| copy, 16 clients | off | 192.7 <sub>(178–207)</sub> | 64.2 ms | 12,634 ms | 388 | – |
+| | ngram | 186.4 <sub>(184–189)</sub> | 67.9 ms | 13,280 ms | 345 | 39% |
+
+* At 1–4 clients the server-level gains match the paired sweep: **1.55–1.65× throughput on copy
+  tasks**, 1.15× on open questions; TTFT is unchanged (the prefill is not speculated).
+* At 16 clients speculation is off while more than 4 sequences decode and only engages at the
+  tail of the run (230 draft tokens in total): throughput is within the run-to-run spread of the
+  baseline. It neither helps nor hurts there, which is the point of `SPEC_MAX_BATCH`.
+* Inter-token gaps become burstier: several tokens arrive together after a slightly longer step,
+  so the ITL p95 per chunk rises (33 → 41 ms for copy, 1 client) while time per token falls.
+* A first HTTP run sent `ignore_eos` (the load generator's default, which forces fixed-length
+  outputs in the other suites). Text generated past EOS is repetitive, which flatters n-gram
+  drafts, so that run was discarded and the suite now disables `ignore_eos`
+  (kept for the record in `results/speculative/http-ignore-eos/`).
+
 ## Bottlenecks and optimization log
 
 **Where the time goes.** `torch.profiler` on one decode step (CPU, batch 1 and 16): ~1,820–1,910
@@ -275,6 +360,18 @@ casts is not a single kernel on MPS. Lesson: kernel counts are a proxy; only wal
 **~25× slower** than eager (331 vs 13 ms at batch 1; `results/profile/torch-compile-mps.txt`).
 Inductor's MPS backend is not competitive for this workload in torch 2.14.
 
+**Attempt 3 — no attention mask for single-sequence decode (merged).** A one-query step of a
+single sequence attends to every key, so the all-True boolean mask is pure overhead. Paired A/B
+on the real model (variants alternated every iteration; `bench/ab_attention_mask.py`,
+`results/profile/ab-implicit-mask.json`): **17% faster per decode step at 300 tokens of context,
+21% at 1,000**, logits bit-identical. Using SDPA's `is_causal` for single-sequence prefill instead
+of the mask was mixed (−16% at 256 tokens, +6% at 1,024) and was not kept. The suites above were
+measured before this change and were not re-run. After it, a paired decode-step A/B against
+Transformers on the same fp16 weights (`bench/ab_single_stream.py`,
+`results/profile/ab-single-stream.json`) has our step **11–18% faster** (24.5 vs 28.5 ms at 128
+tokens of context, 34.1 vs 37.4 ms at 1,024) — where the `batching` suite had found parity to
+~9% slower.
+
 **What would actually help** (not attempted): a fused paged-attention kernel that reads K/V
 blocks in place (removes the per-layer gather of `[batch, context]` K/V and several launches),
 fused norm/RoPE/activation kernels written for Metal or Triton, and graph capture (CUDA graphs on
@@ -287,6 +384,9 @@ NVIDIA). These are exactly what vLLM and llama.cpp have and MiniServe does not.
 * Two rounds per suite: enough to see large effects (2× and up), not to resolve differences of a
   few percent.
 * Client and server share the machine (the client's CPU use competes with the server).
+* Speculative decoding: the gain depends entirely on how much the output repeats its context.
+  The prompt sets were written for this benchmark (12 + 12 prompts, one model); treat 1.6× as
+  "what copy-heavy requests get here", not as a general speedup.
 * One small model (135M). Larger models shift the balance from launch overhead to memory
   bandwidth and compute; the qualitative scheduling results should hold, the ratios will not.
 * Git state: the `batching` run was taken at `be441d8` with uncommitted changes limited to the
