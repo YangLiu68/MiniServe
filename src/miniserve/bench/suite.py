@@ -109,7 +109,11 @@ def collect_env() -> dict[str, Any]:
         except ImportError:
             pass
     if RQ.exists():  # shared-machine resource manager: record contention alongside results
-        info["rq_status"] = _run([str(RQ), "status"])
+        status = _run([str(RQ), "status"]) or ""
+        # Machine-level lines only: other sessions' jobs and account details stay out of results.
+        keep = ("machine:", "disk:", "thermal:")
+        machine = [ln for ln in status.splitlines() if ln.startswith(keep)]
+        info["rq_status"] = "\n".join(machine) or None
     return info
 
 
