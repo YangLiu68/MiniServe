@@ -8,11 +8,11 @@ is explicitly caveated.
 
 | Question | Measured answer |
 |---|---|
-| Continuous batching vs one-request-at-a-time (16 clients) | **197 vs 24–29 output tok/s** (6.8–8.3×); median TTFT **0.46 s vs 32–38 s**; per-token latency 35 → 73 ms |
-| Is our forward pass slower than Transformers for one stream? | suite (before the mask fix): parity to ~9% slower. Paired decode-step A/B after dropping the single-sequence attention mask: **ours 11–18% faster** (128–1,024 tokens of context) |
+| Continuous batching vs one-request-at-a-time (16 clients) | **335 vs 53 output tok/s** (6.4× Transformers; 4.8× our own one-at-a-time engine at 70 tok/s); median TTFT **0.24 s vs 13–18 s**; per-token latency 13–19 → 45 ms. (October run on a busier machine: 197 vs 24–29 tok/s, 6.8×) |
+| Is our forward pass slower than Transformers for one stream? | No longer. After dropping the single-sequence attention mask: paired decode-step A/B **ours 11–18% faster** (128–1,024 tokens of context); suite rerun at 1 client **72.5 vs 60.6 tok/s** (TPOT 12.9 vs 16.3 ms). Before the fix (October suite): parity to ~9% slower |
 | Head-of-line blocking behind long generations | chat TTFT p50 **13.5 s → 87 ms** |
 | Long prompts stalling running streams | chunked prefill cuts chat ITL p95 **663 → 163 ms**; long prompts' own TTFT +29% |
-| Prefix caching (1,024-token shared system prompt) | TTFT p50 **671 → 75 ms**, throughput **3×**, 94% of prompt tokens from cache, peak KV 18% → 5% |
+| Prefix caching (1,024-token shared system prompt) | TTFT p50 **818 → 86 ms** (9.5×), throughput **2.9×**, 94% of prompt tokens from cache, peak KV 18% → 5%. (October run: 671 → 75 ms, 3.0×) |
 | Fairness (heavy tenant: 12 in flight, light: 1; 4 slots) | VTC: light tenant TTFT p50 **4.6 → 2.1 s**, 8 → 14 completions per round; total throughput unchanged |
 | int8 weight-only quantization | weights **257 → 129 MB**, perplexity 14.617 → 14.610 (unchanged), 96.9% top-1 agreement; single-stream decode **13% faster** |
 | Ollama (llama.cpp + Metal) on the same Mac | 1 client: Ollama **~3× faster** (112 vs 39 tok/s). 16 clients: MiniServe **304 vs 242 tok/s**, TTFT p50 238 vs 477 ms (wide spread) |
@@ -27,7 +27,8 @@ is explicitly caveated.
   average 10–20 during these runs; 90+ earlier in the day). Every benchmark ran under a lease
   from the machine's resource manager (`-g 1 -c 2 -m 3`), and each result file records the
   manager's status and the load average before/after. Absolute numbers on a quiet machine will
-  be better; the comparisons are what these runs are for.
+  be better; the comparisons are what these runs are for. The `batching` and `prefix` suites were
+  re-run on 2026-11-03 at a clean commit (`2411856`) with load average ~4; both runs are kept.
 * **Robust comparisons.** Each suite runs every configuration once per round, rotating the order
   between rounds (A B C, B C A, …) so slow drift in background load does not favour whichever runs
   first. Tables show the **median across rounds** with the min–max spread for headline cells.
@@ -73,33 +74,55 @@ there is concurrency.
 Closed-loop clients, prompt 128 tokens, 64 output tokens. `hf-sequential` = Transformers with its
 own `DynamicCache`, one request at a time (the M1 design); `native-sequential` = our engine with
 `max_num_seqs=1`; `native-continuous` = our engine, up to 32 sequences per step. Prefix caching off.
-2 rounds; raw data `results/batching/run1/`.
+2 rounds. **Rerun of 2026-11-03** at the clean commit `2411856` (after the attention-mask change in
+the optimization log), load average ~4; raw data `results/batching/run2/`.
 
 | concurrency | config | out tok/s | TTFT p50 (ms) | TTFT p95 | TPOT p50 | E2E p95 | mean batch |
 |---:|---|---:|---:|---:|---:|---:|---:|
-| 1 | hf-sequential | 28.7 | 67 | 86 | 34.7 | 2,461 | 1.0 |
-| 1 | native-sequential | 25.0 | 75 | 100 | 37.9 | 2,953 | 1.0 |
-| 1 | native-continuous | 28.0 | 71 | 99 | 35.9 | 2,480 | 1.0 |
-| 4 | hf-sequential | 29.3 | 5,942 | 7,038 | 32.8 | 9,568 | 1.0 |
-| 4 | native-sequential | 25.5 | 7,453 | 8,021 | 38.4 | 10,431 | 1.0 |
-| 4 | native-continuous | **88.1** | **265** | 396 | 43.4 | 3,338 | 3.9 |
-| 16 | hf-sequential | 29.2 | 32,409 | 38,436 | 33.6 | 40,526 | 1.0 |
-| 16 | native-sequential | 23.8 | 38,314 | 42,218 | 39.9 | 44,805 | 1.0 |
-| 16 | native-continuous | **197.3** | **463** | 765 | 73.2 | 5,986 | 15.3 |
+| 1 | hf-sequential | 60.6 | 39 | 50 | 16.3 | 1,243 | 1.0 |
+| 1 | native-sequential | 72.5 | 35 | 48 | 12.9 | 1,049 | 1.0 |
+| 1 | native-continuous | 79.3 | 26 | 44 | 12.1 | 955 | 1.0 |
+| 4 | hf-sequential | 62.7 | 2,967 | 3,316 | 16.0 | 4,280 | 1.0 |
+| 4 | native-sequential | 67.3 | 2,759 | 3,036 | 14.1 | 3,985 | 1.0 |
+| 4 | native-continuous | **173.2** | **96** | 116 | 22.3 | 1,640 | 3.9 |
+| 16 | hf-sequential | 52.6 | 17,977 | 19,270 | 19.0 | 20,448 | 1.0 |
+| 16 | native-sequential | 70.0 | 13,219 | 14,286 | 13.5 | 15,163 | 1.0 |
+| 16 | native-continuous | **334.7** | **236** | 427 | 45.2 | 3,333 | 15.3 |
 
 ![throughput](docs/img/bench/batching_output_token_throughput.png)
 ![ttft](docs/img/bench/batching_ttft_p95.png)
 ![tpot](docs/img/bench/batching_tpot_p50.png)
 
-**Reading it.** One-at-a-time serving is flat at ~25–29 tok/s regardless of load, so queueing
-delay explodes (TTFT 32–38 s at 16 clients). Continuous batching scales throughput with load
-(6.8× the Transformers baseline at 16 clients) and keeps TTFT sub-second. The trade-off is per-
-token latency: each step now carries 15 sequences, so TPOT doubles (35 → 73 ms). At concurrency 1
-our engine was at parity to ~9% slower per token than Transformers (35.9–37.9 vs 34.7 ms; since
-improved, see Attempt 3 in the optimization log). The two
-native configs do identical work at concurrency 1 yet differ by 5%, which is the noise floor of
-these runs; to the extent the gap is real, our per-step metadata construction and gather-based
-attention cost a little more than HF's contiguous cache when there is nothing to batch.
+**Reading it.** One-at-a-time serving is flat at ~53–73 tok/s regardless of load, so queueing
+delay explodes (TTFT 13–18 s at 16 clients). Continuous batching scales throughput with load
+(6.4× the Transformers baseline and 4.8× our own one-at-a-time engine at 16 clients) and keeps
+TTFT p95 under half a second. The trade-off is per-token latency: each step now carries 15
+sequences, so TPOT rises from 13–19 to 45 ms. At concurrency 1 our engine is now faster per token
+than Transformers (TPOT 12.9 vs 16.3 ms), consistent with the paired A/B in Attempt 3 of the
+optimization log. The two native configs do identical work at concurrency 1 yet differ by 9%
+(72.5 vs 79.3 tok/s, with a 69–90 spread across rounds for the latter): that is the noise floor
+of these runs.
+
+**The October run** (`results/batching/run1/`, commit `be441d8`, load average 11–15, before the
+mask change; charts in `docs/img/bench/batching-run1/`):
+
+| concurrency | config | out tok/s | TTFT p50 (ms) | TPOT p50 | mean batch |
+|---:|---|---:|---:|---:|---:|
+| 1 | hf-sequential | 28.7 | 67 | 34.7 | 1.0 |
+| 1 | native-sequential | 25.0 | 75 | 37.9 | 1.0 |
+| 1 | native-continuous | 28.0 | 71 | 35.9 | 1.0 |
+| 4 | hf-sequential | 29.3 | 5,942 | 32.8 | 1.0 |
+| 4 | native-sequential | 25.5 | 7,453 | 38.4 | 1.0 |
+| 4 | native-continuous | **88.1** | **265** | 43.4 | 3.9 |
+| 16 | hf-sequential | 29.2 | 32,409 | 33.6 | 1.0 |
+| 16 | native-sequential | 23.8 | 38,314 | 39.9 | 1.0 |
+| 16 | native-continuous | **197.3** | **463** | 73.2 | 15.3 |
+
+In the rerun throughput is 1.7–2.9× higher and latencies 1.6–3.0× lower, mostly because the
+machine was far less busy; the largest gains (2.6–2.9×) are in the native configs that run one
+sequence per step, which also got the mask change. The headline ratio held: 6.8× the Transformers baseline at 16 clients in October, 6.4× now. In
+October our engine was at parity to ~9% slower per token than Transformers at concurrency 1
+(35.9–37.9 vs 34.7 ms).
 
 ## M2/M3 — head-of-line blocking (suite `hol`)
 
@@ -141,18 +164,29 @@ percentiles rest on ~190–570 inter-token gaps per round, but its TTFT on few r
 ## M4 — prefix caching (suite `prefix`)
 
 Every request = the same **1,024-token system prompt** + a unique ~24-token question, 16 output
-tokens; 4 closed-loop clients, 24 requests; continuous batching on in both configs; 2 rounds
-(`results/prefix/run1/`).
+tokens; 4 closed-loop clients, 24 requests; continuous batching on in both configs; 2 rounds.
+Rerun of 2026-11-03 at commit `2411856` (`results/prefix/run2/`) and the October run at `45b5b4b`
+(`results/prefix/run1/`):
 
-| config | TTFT p50 | TTFT p95 | TPOT p50 | E2E p95 | out tok/s | req/s | prompt tokens from cache | peak KV usage | mean step |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| prefix cache off | 671 ms | 947 ms | 92.7 ms | 2,446 ms | 30.4 | 1.90 | 0% | 18% | 106 ms |
-| prefix cache **on** | **75 ms** | **220 ms** | **40.9 ms** | **805 ms** | **90.1** | **5.63** | **94%** | **5%** | 41 ms |
+| run | config | TTFT p50 | TTFT p95 | TPOT p50 | E2E p95 | out tok/s | req/s | prompt tokens from cache | peak KV usage | mean step |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Nov | prefix cache off | 818 ms | 992 ms | 103.4 ms | 2,643 ms | 27.4 | 1.71 | 0% | 18% | 117 ms |
+| Nov | prefix cache **on** | **86 ms** | **219 ms** | **48.1 ms** | **868 ms** | **78.5** | **4.91** | **94%** | **5%** | 47 ms |
+| Oct | prefix cache off | 671 ms | 947 ms | 92.7 ms | 2,446 ms | 30.4 | 1.90 | 0% | 18% | 106 ms |
+| Oct | prefix cache **on** | **75 ms** | **220 ms** | **40.9 ms** | **805 ms** | **90.1** | **5.63** | **94%** | **5%** | 41 ms |
+
+Unlike the `batching` suite, the rerun is *slower* here than in October (median TTFT 14–22%
+higher, throughput 10–13% lower) even though the load average was lower (~4.5 vs ~11). Load average counts only CPU: during this
+run the resource manager reported both GPU slots leased (another job held the second one; in
+October one was free) and memory pressure at WARN, and this suite is dominated by 1,024-token
+prefills, which load the GPU far more than the small decode steps of `batching`. The cause was
+not isolated. The comparison itself held: TTFT 9.5× lower with the cache (8.9× in October),
+throughput 2.9× (3.0×).
 
 With the cache on, each request computes only its ~24-token tail plus at least one token of the
 last block (the first request in a burst still pays the full prefill; concurrent identical
-prefixes admitted in the same step are not deduplicated). Effects compound: TTFT drops 9×,
-throughput triples, and — because steps no longer carry 1,000-token prefills for other
+prefixes admitted in the same step are not deduplicated). Effects compound: TTFT drops 9–10×,
+throughput roughly triples, and — because steps no longer carry 1,000-token prefills for other
 requests — the per-token latency of everyone else halves. KV memory falls too: the shared prompt
 occupies its 64 blocks once, referenced by every running request, instead of once per request.
 Correctness of hits is covered by tests (cache-hit outputs are identical to cold outputs on tiny
@@ -344,8 +378,8 @@ engine steps is deterministic and contention-free.
 ATen calls per step, of which ~1,240–1,280 do work (the rest are views) — about 41 per layer
 for 30 layers. On MPS each kernel launch costs tens of microseconds, so a 135M-parameter model
 spends most of a single-sequence step on launch overhead rather than math. That is why batching
-is so effective here, and why single-stream speed is roughly at parity with Transformers rather
-than better.
+is so effective here, and why single-stream speed is only modestly ahead of Transformers
+(after Attempt 3 below) rather than far ahead.
 
 **Attempt 1 — fewer kernels (not merged).** Fused the RMSNorm into `F.rms_norm` (kept the fp32
 upcast so results stay bit-identical to Transformers) and applied RoPE to Q and K in one pass.
@@ -365,12 +399,13 @@ single sequence attends to every key, so the all-True boolean mask is pure overh
 on the real model (variants alternated every iteration; `bench/ab_attention_mask.py`,
 `results/profile/ab-implicit-mask.json`): **17% faster per decode step at 300 tokens of context,
 21% at 1,000**, logits bit-identical. Using SDPA's `is_causal` for single-sequence prefill instead
-of the mask was mixed (−16% at 256 tokens, +6% at 1,024) and was not kept. The suites above were
-measured before this change and were not re-run. After it, a paired decode-step A/B against
+of the mask was mixed (−16% at 256 tokens, +6% at 1,024) and was not kept. The `batching` and
+`prefix` suites were re-run after this change (November rows above); the other suites were
+measured before it and were not re-run. After it, a paired decode-step A/B against
 Transformers on the same fp16 weights (`bench/ab_single_stream.py`,
 `results/profile/ab-single-stream.json`) has our step **11–18% faster** (24.5 vs 28.5 ms at 128
-tokens of context, 34.1 vs 37.4 ms at 1,024) — where the `batching` suite had found parity to
-~9% slower.
+tokens of context, 34.1 vs 37.4 ms at 1,024) — where the October `batching` suite had found
+parity to ~9% slower. The November rerun agrees: 72.5 vs 60.6 tok/s at one client.
 
 **What would actually help** (not attempted): a fused paged-attention kernel that reads K/V
 blocks in place (removes the per-layer gather of `[batch, context]` K/V and several launches),
@@ -389,6 +424,8 @@ NVIDIA). These are exactly what vLLM and llama.cpp have and MiniServe does not.
   "what copy-heavy requests get here", not as a general speedup.
 * One small model (135M). Larger models shift the balance from launch overhead to memory
   bandwidth and compute; the qualitative scheduling results should hold, the ratios will not.
-* Git state: the `batching` run was taken at `be441d8` with uncommitted changes limited to the
-  dashboard endpoints, docs and tests (engine, scheduler, block manager and backends unchanged —
-  verified with `git diff`).
+* Runs weeks apart differ a lot in absolute terms (the `batching` rerun had 1.7–2.9× the
+  throughput, the `prefix` rerun 10–13% less), so compare configurations within a run, not tok/s across runs.
+* Git state: the October `batching` run was taken at `be441d8` with uncommitted changes limited to
+  the dashboard endpoints, docs and tests (engine, scheduler, block manager and backends unchanged —
+  verified with `git diff`). The November reruns used a clean checkout of `2411856`.

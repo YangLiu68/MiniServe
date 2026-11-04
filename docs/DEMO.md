@@ -78,7 +78,7 @@ second request:  usage: {'prompt_tokens': 83, 'completion_tokens': 48, 'prompt_t
 
 64 of the second request's 83 prompt tokens (4 full 16-token blocks) were served from the cache.
 With a prompt this short TTFT barely changes (134 vs 138 ms — a step's fixed cost dominates); with
-a 1,024-token shared prompt the benchmark measured TTFT 671 → 75 ms.
+a 1,024-token shared prompt the benchmark measured TTFT 818 → 86 ms.
 
 ## 5. Cancel a running request
 

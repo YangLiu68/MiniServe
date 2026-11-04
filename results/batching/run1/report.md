@@ -31,8 +31,8 @@ M3 - throughput vs latency at matched model/device/dtype (SmolLM2-135M, MPS fp16
 | native-sequential | 32/0 | 23.8 <sub>(23.6–24.1)</sub> | 0.37 | 38,314 <sub>(37,635–38,993)</sub> | 42,218 <sub>(41,449–42,986)</sub> | 39.9 | 59.6 | 44,805 | 1.0 | 41.7 | 1% | 246.3 | 0.0 | 0% |
 | native-continuous | 32/0 | 197.3 <sub>(193.1–201.5)</sub> | 3.08 | 463.1 <sub>(403.9–522.4)</sub> | 765.3 <sub>(569.0–961.6)</sub> | 73.2 | 120.3 | 5,986 | 15.3 | 76.6 | 13% | 348.9 | 0.0 | 0% |
 
-![batching_output_token_throughput](docs/img/bench/batching_output_token_throughput.png)
+![batching_output_token_throughput](docs/img/bench/batching-run1/batching_output_token_throughput.png)
 
-![batching_ttft_p95](docs/img/bench/batching_ttft_p95.png)
+![batching_ttft_p95](docs/img/bench/batching-run1/batching_ttft_p95.png)
 
-![batching_tpot_p50](docs/img/bench/batching_tpot_p50.png)
+![batching_tpot_p50](docs/img/bench/batching-run1/batching_tpot_p50.png)

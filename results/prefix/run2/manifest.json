@@ -1,0 +1,70 @@
+{
+  "suite": "prefix",
+  "description": "M4 - automatic prefix caching. Every request shares a 1024-token system prompt and adds a unique ~24-token question (16 output tokens); 4 closed-loop clients. Continuous batching on in both configs.",
+  "env": {
+    "miniserve": "0.1.0",
+    "git_sha": "2411856326bc1270ea3bd56fa61266da69707f93",
+    "git_dirty": false,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      4.35,
+      4.22,
+      4.25
+    ],
+    "time": "2026-11-03T23:36:04-0800",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 4.3/10 cores, unmanaged cpu 1.6, lease cpu cap 7.9 (free 4.4) | RAM avail 3.5G, lease mem free 0.7G, pressure WARN | gpu free 0/2\ndisk: 14.0 GB free\nthermal: fair, cpu die max 65.5\u00b0C avg 58\u00b0C"
+  },
+  "configs": [
+    {
+      "name": "prefix-cache-off",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "false"
+      },
+      "external": null
+    },
+    {
+      "name": "prefix-cache-on",
+      "env": {
+        "MINISERVE_ENABLE_PREFIX_CACHING": "true"
+      },
+      "external": null
+    }
+  ],
+  "rounds": 2,
+  "scenarios": [
+    "shared-system-prompt"
+  ],
+  "runs": [
+    "shared-system-prompt__prefix-cache-off__r0.json",
+    "shared-system-prompt__prefix-cache-on__r0.json",
+    "shared-system-prompt__prefix-cache-on__r1.json",
+    "shared-system-prompt__prefix-cache-off__r1.json"
+  ],
+  "env_after": {
+    "miniserve": "0.1.0",
+    "git_sha": "2411856326bc1270ea3bd56fa61266da69707f93",
+    "git_dirty": false,
+    "python": "3.12.10",
+    "platform": "macOS-15.3.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M4",
+    "cpu_count": 10,
+    "memory_gb": 16.0,
+    "loadavg": [
+      5.15,
+      4.47,
+      4.33
+    ],
+    "time": "2026-11-03T23:37:10-0800",
+    "torch": "2.14.1",
+    "transformers": "5.19.0",
+    "rq_status": "machine: load 5.0/10 cores, unmanaged cpu 2.0, lease cpu cap 7.5 (free 4.0) | RAM avail 2.5G, lease mem free 0.6G, pressure WARN | gpu free 0/2\ndisk: 14.0 GB free\nthermal: fair, cpu die max 65.7\u00b0C avg 58.1\u00b0C"
+  }
+}

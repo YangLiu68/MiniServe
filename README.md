@@ -32,12 +32,12 @@ recorded with every run); medians of 2 rounds with rotated order. Full tables, s
 
 | Question | Answer (measured) |
 |---|---|
-| Does continuous batching pay off? | At 16 concurrent clients: **197 vs 29 output tok/s** (6.8× the Transformers one-at-a-time baseline), median TTFT **0.46 s vs 32 s**; per-token latency rises from ~35 to ~73 ms |
+| Does continuous batching pay off? | At 16 concurrent clients: **335 vs 53 output tok/s** (6.4× the Transformers one-at-a-time baseline), median TTFT **0.24 s vs 18 s**; per-token latency rises from ~19 to ~45 ms |
 | Short requests stuck behind long generations? | chat TTFT p50 **13.5 s (FIFO) → 87 ms** (continuous batching) |
 | Long prompts stalling streams that are already running? | chunked prefill: chat inter-token p95 **663 → 163 ms**, at +29% TTFT for the long prompts themselves |
-| Shared 1,024-token system prompt (prefix caching)? | TTFT p50 **671 → 75 ms**, 3× throughput, 94% of prompt tokens served from cache |
+| Shared 1,024-token system prompt (prefix caching)? | TTFT p50 **818 → 86 ms**, 2.9× throughput, 94% of prompt tokens served from cache |
 | One tenant flooding the server? | fair (VTC) scheduling: the light tenant's TTFT p50 **4.6 → 2.1 s**, its completions 8 → 14 per round, total throughput unchanged |
-| Is our forward pass slower than Transformers for one stream? | Not any more: parity to ~9% slower in the suite, then **11–18% faster** per decode step (paired A/B) after dropping a redundant attention mask |
+| Is our forward pass slower than Transformers for one stream? | Not any more: parity to ~9% slower at first, then **11–18% faster** per decode step (paired A/B) after dropping a redundant attention mask; one client end to end **72.5 vs 60.6 tok/s** |
 | Speculative decoding (n-gram drafts)? | copy-style tasks (edit, reformat, quote): **1.60× median per-prompt speedup** (up to 5.5×), outputs identical; over HTTP **1.55× (1 client) / 1.65× (4 clients) throughput**; free-form questions 1.09–1.15×; switches itself off under heavy load |
 | int8 weight-only quantization? | weights 257 → 129 MB, perplexity unchanged (14.62 → 14.61), single-stream decode 13% faster |
 | How does it compare with Ollama (llama.cpp + Metal) on the same Mac? | One stream: Ollama is **~3× faster** (fused Metal kernels vs ~1,200 PyTorch launches per step). 16 clients: MiniServe **304 vs 242 tok/s** and half the median TTFT — comparable-to-ahead, wide spread; caveats in BENCHMARK.md |
