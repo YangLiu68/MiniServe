@@ -63,11 +63,14 @@ curl -s localhost:8000/v1/chat/completions -H 'Authorization: Bearer demo-key' \
 ```
 
 ```python
-from openai import OpenAI   # the official SDK works unchanged
+from openai import OpenAI  # the official SDK works unchanged
+
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="demo-key")
 for chunk in client.chat.completions.create(
-        model="HuggingFaceTB/SmolLM2-135M-Instruct", stream=True,
-        messages=[{"role": "user", "content": "Write a haiku about caches."}]):
+    model="HuggingFaceTB/SmolLM2-135M-Instruct",
+    stream=True,
+    messages=[{"role": "user", "content": "Write a haiku about caches."}],
+):
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 

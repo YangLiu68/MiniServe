@@ -16,7 +16,10 @@ export MINISERVE_MAX_NUM_SEQS=4
 export MINISERVE_BACKEND=${MINISERVE_BACKEND:-toy}
 export MINISERVE_TOY_STEP_OVERHEAD_MS=${MINISERVE_TOY_STEP_OVERHEAD_MS:-30}
 
-miniserve >/dev/null 2>&1 &
+# The repo's virtualenv binary when the venv is not activated (no `uv run` wrapper, so the
+# EXIT trap's kill reaches the server itself).
+MINISERVE_BIN=$(command -v miniserve || echo "$(dirname "$0")/../.venv/bin/miniserve")
+"$MINISERVE_BIN" >/dev/null 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null' EXIT
 for _ in $(seq 1 120); do

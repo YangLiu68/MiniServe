@@ -101,14 +101,14 @@ function tiles(b, info) {
   const used = [...b.states].filter((c) => /[1-9]/.test(c)).length;  // not "c" >= "1"!
   const cached = [...b.states].filter((c) => c === "c").length;
   const now = performance.now();
-  const sps = lastSteps === null ? 0 : (b.steps - lastSteps) / ((now - lastT) / 1000);
+  const sps = lastSteps === null ? null : (b.steps - lastSteps) / ((now - lastT) / 1000);
   lastSteps = b.steps; lastT = now;
   const hit = b.prefix_queried_tokens ? b.prefix_hit_tokens / b.prefix_queried_tokens : 0;
   const items = [
     ["running", b.running.length], ["waiting", b.waiting],
     ["KV blocks in use", `${(100 * used / b.states.length).toFixed(0)}%`],
     ["cached blocks", cached], ["prefix hit rate", `${(100 * hit).toFixed(0)}%`],
-    ["engine steps / s", sps.toFixed(1)], ["preemptions", b.preemptions],
+    ["engine steps / s", sps === null ? "–" : sps.toFixed(1)], ["preemptions", b.preemptions],
   ];
   const spec = b.speculative;
   if (spec && spec.draft_tokens) {
